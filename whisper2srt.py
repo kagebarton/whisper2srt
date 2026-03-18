@@ -1,5 +1,7 @@
 import os
 import re
+import glob
+import argparse
 import config
 import stable_whisper
 
@@ -143,15 +145,12 @@ def save_srt_from_alignment(result, lyrics_file_path: str, output_path: str):
 			f.write(f"{i}\n{block['start']} --> {block['end']}\n{block['text']}\n\n")
 
 
-if __name__ == "__main__":
-	file_path = "/home/ken/Downloads/KPop Demon Hunters - What It Sounds Like.webm"
-	output_path = "/home/ken/Downloads/KPop Demon Hunters - What It Sounds Like.srt"
-
-	# Check for a .txt lyrics file with the same filename prefix
+def process_file(model, file_path: str):
 	prefix = os.path.splitext(file_path)[0]
 	lyrics_path = prefix + ".txt"
+	output_path = prefix + ".srt"
 
-	model = load_model()
+	print(f"\nProcessing: {file_path}")
 
 	if os.path.exists(lyrics_path):
 		result = align_audio(model, file_path, lyrics_path)
@@ -161,3 +160,25 @@ if __name__ == "__main__":
 		save_srt_from_transcription(result, output_path)
 
 	print(f"SRT saved to {output_path}")
+
+
+if __name__ == "__main__":
+	parser = argparse.ArgumentParser(description="Transcribe or align audio to SRT subtitles.")
+	parser.add_argument("files", nargs="+", help="Audio file path(s); supports wildcards e.g. *.mp3")
+	args = parser.parse_args()
+
+	# Expand wildcards manually (needed on Linux when the shell doesn't expand them)
+	file_paths = []
+	for pattern in args.files:
+		matches = glob.glob(pattern)
+		if matches:
+			file_paths.extend(sorted(matches))
+		else:
+			print(f"Warning: no files matched '{pattern}'")
+
+	if not file_paths:
+		print("No files to process.")
+	else:
+		model = load_model()
+		for file_path in file_paths:
+			process_file(model, file_path)
