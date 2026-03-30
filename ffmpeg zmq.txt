@@ -1,0 +1,13 @@
+ffmpeg -re -i vocal.m4a -i nonvocal.m4a \
+  -filter_complex "[0:a]volume@vocalvol=1.0,azmq=bind_address=tcp\\\://127.0.0.1\\\:5556[vocal];[1:a]volume@nonvocalvol=1.0[nonvocal];[vocal][nonvocal]amix=inputs=2:normalize=0[out]" \
+  -map "[out]" -f pulse default
+
+python3 -c "
+import zmq
+ctx = zmq.Context()
+sock = ctx.socket(zmq.REQ)
+sock.setsockopt(zmq.RCVTIMEO, 2000)
+sock.connect('tcp://127.0.0.1:5556')
+sock.send_string('volume@vocalvol volume 0.2')
+print(sock.recv())
+"
