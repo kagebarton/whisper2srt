@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, render_template, request, jsonify
 
 app = Flask(__name__)
@@ -14,6 +15,7 @@ app = Flask(__name__)
 IPC_SOCKET = "/tmp/mpv-socket"
 NONVOCAL_VOL = 1.0  # fixed
 QR_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qrcode.png")
+PLACEHOLDER_PNG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "placeholder.png")
 
 SONG_DIR = "/home/ken/whisper2srt/song"
 DEFAULT_VIDEO    = os.path.join(SONG_DIR, "selfish.mp4")
@@ -90,26 +92,72 @@ def send_mpv_command(cmd_dict):
         pass
 
 
-def launch_mpv():
-    """Start MPV with the three tracks and the initial filter complex."""
+def send_mpv_query(cmd_dict):
+    """Send a JSON command to MPV and return the parsed response (or None on failure)."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(IPC_SOCKET)
+            s.sendall(json.dumps(cmd_dict).encode() + b'\n')
+            s.settimeout(1.0)
+            resp = s.recv(4096).decode()
+            return json.loads(resp)
+    except (ConnectionRefusedError, OSError, json.JSONDecodeError, socket.timeout):
+        return None
+
+
+def generate_placeholder():
+    """Create a 1920x1080 black PNG with 'PROTOTYPE' text and the localhost URL."""
+    img = Image.new("RGB", (1280, 720), "black")
+    draw = ImageDraw.Draw(img)
+    font_large = ImageFont.load_default(size=80)
+    font_small = ImageFont.load_default(size=36)
+
+    text_main = "PROTOTYPE"
+    text_sub = "http://localhost:5000"
+
+    bbox_main = draw.textbbox((0, 0), text_main, font=font_large)
+    text_w = bbox_main[2] - bbox_main[0]
+    draw.text(((1920 - text_w) / 2, 400), text_main, fill="white", font=font_large)
+
+    bbox_sub = draw.textbbox((0, 0), text_sub, font=font_small)
+    text_w_sub = bbox_sub[2] - bbox_sub[0]
+    draw.text(((1920 - text_w_sub) / 2, 520), text_sub, fill="white", font=font_small)
+
+    img.save(PLACEHOLDER_PNG)
+
+
+def load_placeholder():
+    """Load the placeholder PNG into the running MPV instance."""
+    send_mpv_command({"command": ["loadfile", PLACEHOLDER_PNG]})
+
+
+def reset_state_defaults():
+    """Reset all playback state to defaults."""
+    state["playing"] = False
+    state["position"] = 0.0
+    state["duration"] = 0.0
+    state["vocal_volume"] = 1.0
+    state["semitones"] = 0
+    state["subtitle_delay"] = 0.0
+
+
+def start_mpv():
+    """Start a persistent MPV instance in idle mode. No files loaded yet."""
     global mpv_proc
     cmd = [
         "mpv",
-        state["video_path"],
-        f'--audio-file={state["vocal_path"]}',
-        f'--audio-file={state["nonvocal_path"]}',
-        f'--lavfi-complex={build_filter_complex(state["vocal_volume"], semitones_to_pitch(state["semitones"]))}',
-        f'--input-ipc-server={IPC_SOCKET}',
+        "--idle",
+        "--force-window",
+        f"--input-ipc-server={IPC_SOCKET}",
         "--no-terminal",
     ]
-    if state["subtitle_path"]:
-        cmd.insert(2, f'--sub-file={state["subtitle_path"]}')
     mpv_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # give MPV a moment to create the socket
     time.sleep(0.5)
+    load_placeholder()
 
 
-def stop_mpv():
+def quit_mpv():
     """Tell MPV to quit and clean up the socket file."""
     global mpv_proc
     if mpv_proc is not None:
@@ -128,40 +176,24 @@ def stop_mpv():
 
 
 def poll_position():
-    """Periodically query MPV for time-pos and duration. Clears playing state if MPV exits."""
+    """Periodically query MPV for time-pos and duration. Checks idle-active for song-end detection."""
     while not poll_stop.is_set():
-        # If MPV exited naturally (song ended), reset state
-        if mpv_proc is not None and mpv_proc.poll() is not None:
-            state["playing"] = False
-            state["position"] = 0.0
-            state["duration"] = 0.0
+        # Check if MPV went idle (song ended naturally)
+        idle_resp = send_mpv_query({"command": ["get_property", "idle-active"]})
+        if idle_resp and idle_resp.get("data") is True:
+            reset_state_defaults()
+            load_placeholder()
             poll_stop.set()
             break
 
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                s.connect(IPC_SOCKET)
-                s.sendall(json.dumps({
-                    "command": ["get_property", "time-pos"]
-                }).encode() + b'\n')
-                s.settimeout(0.3)
-                resp = s.recv(4096).decode()
-            data = json.loads(resp)
-            if data.get("data") is not None:
-                state["position"] = float(data["data"])
+        resp = send_mpv_query({"command": ["get_property", "time-pos"]})
+        if resp and resp.get("data") is not None:
+            state["position"] = float(resp["data"])
 
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                s.connect(IPC_SOCKET)
-                s.sendall(json.dumps({
-                    "command": ["get_property", "duration"]
-                }).encode() + b'\n')
-                s.settimeout(0.3)
-                resp = s.recv(4096).decode()
-            data = json.loads(resp)
-            if data.get("data") is not None:
-                state["duration"] = float(data["data"])
-        except Exception:
-            pass
+        resp = send_mpv_query({"command": ["get_property", "duration"]})
+        if resp and resp.get("data") is not None:
+            state["duration"] = float(resp["data"])
+
         poll_stop.wait(0.5)
 
 
@@ -190,7 +222,31 @@ def play():
     if state["playing"]:
         return jsonify({"ok": True})  # already playing
 
-    launch_mpv()
+    reset_state_defaults()
+
+    # Load video
+    send_mpv_command({"command": ["loadfile", state["video_path"]]})
+
+    # Wait for duration > 0 (max 5s)
+    for _ in range(25):
+        resp = send_mpv_query({"command": ["get_property", "duration"]})
+        if resp and resp.get("data") is not None and float(resp["data"]) > 0:
+            break
+        time.sleep(0.2)
+
+    # Add audio tracks
+    send_mpv_command({"command": ["audio-add", state["vocal_path"]]})
+    send_mpv_command({"command": ["audio-add", state["nonvocal_path"]]})
+    time.sleep(0.2)
+
+    # Set filter complex with default vol=1.0 and pitch=1.0
+    fc = build_filter_complex(1.0, semitones_to_pitch(0))
+    send_mpv_command({"command": ["set_property", "lavfi-complex", fc]})
+
+    # Add subtitles if available
+    if state["subtitle_path"]:
+        send_mpv_command({"command": ["sub-add", state["subtitle_path"]]})
+
     state["playing"] = True
     poll_stop.clear()
     global poll_thread
@@ -211,18 +267,18 @@ def pause():
 
 @app.route("/api/stop", methods=["POST"])
 def stop():
-    stop_mpv()
-    state["playing"] = False
-    state["position"] = 0.0
-    state["duration"] = 0.0
+    send_mpv_command({"command": ["stop"]})
+    time.sleep(0.1)
+    load_placeholder()
+    reset_state_defaults()
     poll_stop.set()
     return jsonify({"ok": True})
 
 
 @app.route("/api/exit", methods=["POST"])
 def exit_app():
-    """Stop MPV and shut down the Flask server."""
-    stop_mpv()
+    """Stop playback and shut down the Flask server."""
+    quit_mpv()
     poll_stop.set()
     func = request.environ.get('werkzeug.server.shutdown')
     if func:
@@ -315,4 +371,14 @@ def browse():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    generate_placeholder()
+    _debug = True
+    # With debug=True the Werkzeug reloader spawns a parent watcher + child worker.
+    # Only start MPV in the child (WERKZEUG_RUN_MAIN=true) to avoid two windows.
+    # With debug=False there is only one process, so always start.
+    if not _debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        start_mpv()
+    try:
+        app.run(host="0.0.0.0", port=5000, debug=_debug)
+    finally:
+        quit_mpv()
