@@ -43,20 +43,24 @@
   /* ── File rows ─────────────────────────────────────────── */
   .file-row {
     display: flex;
-    align-items: center;
-    gap: .5rem;
+    flex-direction: column;
+    gap: .35rem;
     margin-bottom: .75rem;
   }
   .file-row label {
-    width: 75px;
-    text-align: right;
-    font-size: .85rem;
+    font-size: .8rem;
     color: var(--text-dim);
-    flex-shrink: 0;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .file-row .input-group {
+    display: flex;
+    gap: .4rem;
+    width: 100%;
   }
   .file-row input[type="text"] {
     flex: 1;
-    padding: .4rem .6rem;
+    padding: .45rem .6rem;
     border-radius: 6px;
     border: 1px solid var(--accent);
     background: var(--bg);
@@ -77,6 +81,7 @@
     cursor: pointer;
     font-size: .85rem;
     white-space: nowrap;
+    flex-shrink: 0;
   }
   .file-row button:hover { background: #1a5276; }
 
@@ -267,23 +272,31 @@
   <!-- File selection -->
   <div class="file-row">
     <label>Video</label>
-    <input type="text" id="videoPath" placeholder="Paste path or click Browse…" value="{{ state.video_path or '' }}">
-    <button onclick="openBrowser('video')">📂 Browse</button>
+    <div class="input-group">
+      <input type="text" id="videoPath" placeholder="Paste path or click Browse…" value="{{ state.video_path or '' }}">
+      <button onclick="openBrowser('video')">📂 Browse</button>
+    </div>
   </div>
   <div class="file-row">
     <label>Vocal</label>
-    <input type="text" id="vocalPath" placeholder="Paste path or click Browse…" value="{{ state.vocal_path or '' }}">
-    <button onclick="openBrowser('vocal')">📂 Browse</button>
+    <div class="input-group">
+      <input type="text" id="vocalPath" placeholder="Paste path or click Browse…" value="{{ state.vocal_path or '' }}">
+      <button onclick="openBrowser('vocal')">📂 Browse</button>
+    </div>
   </div>
   <div class="file-row">
     <label>Non-vocal</label>
-    <input type="text" id="nonvocalPath" placeholder="Paste path or click Browse…" value="{{ state.nonvocal_path or '' }}">
-    <button onclick="openBrowser('nonvocal')">📂 Browse</button>
+    <div class="input-group">
+      <input type="text" id="nonvocalPath" placeholder="Paste path or click Browse…" value="{{ state.nonvocal_path or '' }}">
+      <button onclick="openBrowser('nonvocal')">📂 Browse</button>
+    </div>
   </div>
   <div class="file-row">
     <label>Subtitles</label>
-    <input type="text" id="subtitlePath" placeholder="Optional .srt / .ass path" value="{{ state.subtitle_path or '' }}">
-    <button onclick="openBrowser('subtitle')">📂 Browse</button>
+    <div class="input-group">
+      <input type="text" id="subtitlePath" placeholder="Optional .srt / .ass path" value="{{ state.subtitle_path or '' }}">
+      <button onclick="openBrowser('subtitle')">📂 Browse</button>
+    </div>
   </div>
 
   <!-- Transport -->
