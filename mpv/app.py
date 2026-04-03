@@ -117,11 +117,11 @@ def generate_placeholder():
 
     bbox_main = draw.textbbox((0, 0), text_main, font=font_large)
     text_w = bbox_main[2] - bbox_main[0]
-    draw.text(((1920 - text_w) / 2, 400), text_main, fill="white", font=font_large)
+    draw.text(((1280 - text_w) / 2, 400), text_main, fill="white", font=font_large)
 
     bbox_sub = draw.textbbox((0, 0), text_sub, font=font_small)
     text_w_sub = bbox_sub[2] - bbox_sub[0]
-    draw.text(((1920 - text_w_sub) / 2, 520), text_sub, fill="white", font=font_small)
+    draw.text(((1280 - text_w_sub) / 2, 520), text_sub, fill="white", font=font_small)
 
     img.save(PLACEHOLDER_PNG)
 
@@ -129,6 +129,14 @@ def generate_placeholder():
 def load_placeholder():
     """Load the placeholder PNG into the running MPV instance."""
     send_mpv_command({"command": ["loadfile", PLACEHOLDER_PNG]})
+
+
+def end_song():
+    """Teardown after a song ends: clear filter, show placeholder, reset state."""
+    send_mpv_command({"command": ["set_property", "lavfi-complex", ""]})
+    load_placeholder()
+    reset_state_defaults()
+    poll_stop.set()
 
 
 def reset_state_defaults():
@@ -148,6 +156,7 @@ def start_mpv():
         "mpv",
         "--idle",
         "--force-window",
+        "--image-display-duration=inf",
         f"--input-ipc-server={IPC_SOCKET}",
         "--no-terminal",
     ]
@@ -181,9 +190,7 @@ def poll_position():
         # Check if MPV went idle (song ended naturally)
         idle_resp = send_mpv_query({"command": ["get_property", "idle-active"]})
         if idle_resp and idle_resp.get("data") is True:
-            reset_state_defaults()
-            load_placeholder()
-            poll_stop.set()
+            end_song()
             break
 
         resp = send_mpv_query({"command": ["get_property", "time-pos"]})
@@ -268,10 +275,8 @@ def pause():
 @app.route("/api/stop", methods=["POST"])
 def stop():
     send_mpv_command({"command": ["stop"]})
-    time.sleep(0.1)
-    load_placeholder()
-    reset_state_defaults()
-    poll_stop.set()
+    time.sleep(0.1)   # let MPV process the stop before loading placeholder
+    end_song()
     return jsonify({"ok": True})
 
 
