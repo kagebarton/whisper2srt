@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MPV Mixer</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --accent: #0f3460;
+    --highlight: #e94560;
+    --text: #eee;
+    --text-dim: #999;
+    --row-hover: #1a3a5c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+    padding: 2rem 0;
+  }
+  .container {
+    background: var(--surface);
+    border-radius: 16px;
+    padding: 2rem;
+    width: 520px;
+    max-width: 95vw;
+    box-shadow: 0 8px 32px rgba(0,0,0,.4);
+  }
+  h1 {
+    text-align: center;
+    font-size: 1.5rem;
+    margin-bottom: 1.5rem;
+    letter-spacing: .05em;
+  }
+
+  /* ── File rows ─────────────────────────────────────────── */
+  .file-row {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    margin-bottom: .75rem;
+  }
+  .file-row label {
+    width: 75px;
+    text-align: right;
+    font-size: .85rem;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .file-row input[type="text"] {
+    flex: 1;
+    padding: .4rem .6rem;
+    border-radius: 6px;
+    border: 1px solid var(--accent);
+    background: var(--bg);
+    color: var(--text);
+    font-size: .85rem;
+    font-family: 'Consolas', 'Monaco', monospace;
+  }
+  .file-row input[type="text"]:focus {
+    outline: none;
+    border-color: var(--highlight);
+  }
+  .file-row button {
+    padding: .4rem .7rem;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--text);
+    cursor: pointer;
+    font-size: .85rem;
+    white-space: nowrap;
+  }
+  .file-row button:hover { background: #1a5276; }
+
+  /* ── Transport buttons ────────────────────────────────── */
+  .transport {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    margin: 1.25rem 0;
+  }
+  .transport button {
+    padding: .55rem 1.6rem;
+    border: none;
+    border-radius: 8px;
+    font-size: .95rem;
+    cursor: pointer;
+    color: var(--text);
+    background: var(--accent);
+    transition: background .15s;
+  }
+  .transport button:hover { background: #1a5276; }
+  .transport button.stop { background: var(--highlight); }
+  .transport button.stop:hover { background: #c0392b; }
+  .transport button.exit { background: #555; }
+  .transport button.exit:hover { background: #333; }
+
+  /* ── Seek bar ─────────────────────────────────────────── */
+  .seek-row {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    margin-bottom: 1rem;
+  }
+  .seek-row .time-label {
+    font-size: .75rem;
+    color: var(--text-dim);
+    width: 48px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .seek-row input[type="range"] { flex: 1; }
+
+  /* ── Slider rows ──────────────────────────────────────── */
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    margin-bottom: .75rem;
+  }
+  .slider-row label {
+    width: 110px;
+    text-align: right;
+    font-size: .85rem;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .slider-row input[type="range"] { flex: 1; }
+  .slider-row .val {
+    width: 52px;
+    text-align: center;
+    font-size: .8rem;
+    color: var(--text);
+  }
+
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg);
+    outline: none;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: var(--highlight);
+    cursor: pointer;
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: var(--highlight);
+    cursor: pointer;
+    border: none;
+  }
+
+  /* ── File browser modal ───────────────────────────────── */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.6);
+    z-index: 100;
+    justify-content: center;
+    align-items: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--surface);
+    border-radius: 12px;
+    width: 560px;
+    max-width: 92vw;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 12px 48px rgba(0,0,0,.5);
+  }
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .75rem 1rem;
+    border-bottom: 1px solid var(--accent);
+  }
+  .modal-header h2 { font-size: 1rem; font-weight: 600; }
+  .modal-header button {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 1.3rem;
+    cursor: pointer;
+    padding: 0 .25rem;
+  }
+  .modal-header button:hover { color: var(--text); }
+  .modal-path {
+    padding: .5rem 1rem;
+    font-size: .8rem;
+    color: var(--text-dim);
+    font-family: 'Consolas', 'Monaco', monospace;
+    border-bottom: 1px solid var(--accent);
+    word-break: break-all;
+  }
+  .modal-body {
+    overflow-y: auto;
+    flex: 1;
+    padding: .25rem 0;
+  }
+  .modal-body .entry {
+    display: flex;
+    align-items: center;
+    padding: .45rem 1rem;
+    cursor: pointer;
+    font-size: .85rem;
+    gap: .5rem;
+  }
+  .modal-body .entry:hover { background: var(--row-hover); }
+  .modal-body .entry .icon {
+    width: 20px;
+    text-align: center;
+    flex-shrink: 0;
+    color: var(--text-dim);
+  }
+  .modal-body .entry .icon.dir { color: #f0c040; }
+  .modal-body .entry .name { flex: 1; }
+  .modal-body .entry.selected {
+    background: var(--accent);
+    font-weight: 600;
+  }
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: .5rem;
+    padding: .75rem 1rem;
+    border-top: 1px solid var(--accent);
+  }
+  .modal-footer button {
+    padding: .45rem 1.2rem;
+    border: none;
+    border-radius: 6px;
+    font-size: .85rem;
+    cursor: pointer;
+    color: var(--text);
+  }
+  .modal-footer .cancel-btn { background: var(--accent); }
+  .modal-footer .select-btn { background: var(--highlight); }
+  .modal-footer .select-btn:disabled {
+    opacity: .4;
+    cursor: default;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🎛️ MPV Mixer</h1>
+
+  <!-- File selection -->
+  <div class="file-row">
+    <label>Video</label>
+    <input type="text" id="videoPath" placeholder="Paste path or click Browse…" value="{{ state.video_path or '' }}">
+    <button onclick="openBrowser('video')">📂 Browse</button>
+  </div>
+  <div class="file-row">
+    <label>Vocal</label>
+    <input type="text" id="vocalPath" placeholder="Paste path or click Browse…" value="{{ state.vocal_path or '' }}">
+    <button onclick="openBrowser('vocal')">📂 Browse</button>
+  </div>
+  <div class="file-row">
+    <label>Non-vocal</label>
+    <input type="text" id="nonvocalPath" placeholder="Paste path or click Browse…" value="{{ state.nonvocal_path or '' }}">
+    <button onclick="openBrowser('nonvocal')">📂 Browse</button>
+  </div>
+
+  <!-- Transport -->
+  <div class="transport">
+    <button id="playPauseBtn" onclick="togglePlayPause()">{{ '⏸ Pause' if state.playing else '▶ Play' }}</button>
+    <button class="stop" onclick="stopPlayback()">⏹ Stop</button>
+    <button class="exit" onclick="exitApp()">✕ Exit</button>
+  </div>
+
+  <!-- Seek -->
+  <div class="seek-row">
+    <span class="time-label" id="timeElapsed">{{ '%d:%02d' % (state.position // 60, state.position % 60) if state.duration else '0:00' }}</span>
+    <input type="range" id="seekBar" min="0" max="100" value="{{ (state.position / state.duration * 100) | int if state.duration else 0 }}" step="0.1">
+    <span class="time-label" id="timeTotal">{{ '%d:%02d' % (state.duration // 60, state.duration % 60) if state.duration else '0:00' }}</span>
+  </div>
+
+  <!-- Vocal volume -->
+  <div class="slider-row">
+    <label>Vocal Volume</label>
+    <input type="range" id="vocalVol" min="0" max="2" step="0.01" value="{{ state.vocal_volume }}">
+    <span class="val" id="vocalVolVal">{{ '%.2f' % state.vocal_volume }}</span>
+  </div>
+
+  <!-- Pitch -->
+  <div class="slider-row">
+    <label>Pitch</label>
+    <input type="range" id="pitchSlider" min="-6" max="6" step="1" value="{{ state.semitones }}">
+    <span class="val" id="pitchVal">{{ '%+d st' % state.semitones if state.semitones else '0 st' }}</span>
+  </div>
+</div>
+
+<!-- File browser modal -->
+<div class="modal-overlay" id="fileModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Select File</h2>
+      <button onclick="closeModal()" title="Close">&times;</button>
+    </div>
+    <div class="modal-path" id="modalPath">/</div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-footer">
+      <button class="cancel-btn" onclick="closeModal()">Cancel</button>
+      <button class="select-btn" id="selectBtn" disabled onclick="confirmSelection()">Select</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ── State ──────────────────────────────────────────────
+  let files = {
+    video: document.getElementById('videoPath').value || null,
+    vocal: document.getElementById('vocalPath').value || null,
+    nonvocal: document.getElementById('nonvocalPath').value || null,
+  };
+  let playing = document.getElementById('playPauseBtn').textContent.includes('Pause');
+  let seeking = false;
+  let pollInterval = null;
+
+  // Start polling if server is already playing when page loads
+  if (playing) startPolling();
+
+  // File browser state
+  let browseTarget = null;       // which field ('video' | 'vocal' | 'nonvocal')
+  let browseSelected = null;     // currently selected file path in modal
+  let browseEntries = [];        // current directory entries
+
+  // ── Text fields → send paths on change ─────────────────
+  ['video', 'vocal', 'nonvocal'].forEach(kind => {
+    const el = document.getElementById(kind + 'Path');
+    el.addEventListener('change', () => {
+      files[kind] = el.value.trim() || null;
+      sendFiles();
+    });
+  });
+
+  function sendFiles() {
+    fetch('/api/files', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(files),
+    });
+  }
+
+  // ── File browser modal ─────────────────────────────────
+  function openBrowser(kind) {
+    browseTarget = kind;
+    browseSelected = null;
+    const currentPath = document.getElementById(kind + 'Path').value.trim();
+    // Start from the directory of the existing value, or home
+    const startDir = currentPath ? dirname(currentPath) : null;
+    document.getElementById('selectBtn').disabled = true;
+    navigateTo(startDir || null);
+    document.getElementById('fileModal').classList.add('open');
+  }
+
+  function closeModal() {
+    document.getElementById('fileModal').classList.remove('open');
+    browseTarget = null;
+  }
+
+  function dirname(p) {
+    const parts = p.split('/');
+    parts.pop();
+    return parts.join('/') || '/';
+  }
+
+  function navigateTo(path) {
+    const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : '/api/browse';
+    fetch(url)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          document.getElementById('modalPath').textContent = data.error;
+          document.getElementById('modalBody').innerHTML = '';
+          return;
+        }
+        document.getElementById('modalPath').textContent = data.current;
+        browseEntries = data.entries;
+        renderEntries(data.current, data.parent);
+      });
+  }
+
+  function renderEntries(currentDir, parentPath) {
+    const body = document.getElementById('modalBody');
+    let html = '';
+
+    // Parent link
+    if (parentPath !== null && parentPath !== undefined) {
+      html += `<div class="entry" onclick="navigateTo('${escapeAttr(parentPath)}')">
+        <span class="icon dir">⬆</span>
+        <span class="name">..</span>
+      </div>`;
+    }
+
+    browseEntries.forEach((entry, i) => {
+      const icon = entry.is_dir ? '📁' : '📄';
+      const iconClass = entry.is_dir ? 'icon dir' : 'icon';
+      const cls = entry.is_dir ? '' : '' ;
+      const clickHandler = entry.is_dir
+        ? `onclick="navigateTo('${escapeAttr(entry.path)}')"`
+        : `onclick="selectFile('${escapeAttr(entry.path)}', this)"`;
+      html += `<div class="entry ${cls}" data-idx="${i}" ${clickHandler}>
+        <span class="${iconClass}">${icon}</span>
+        <span class="name">${escapeHtml(entry.name)}</span>
+      </div>`;
+    });
+
+    body.innerHTML = html;
+  }
+
+  function selectFile(path, el) {
+    // Deselect previous
+    document.querySelectorAll('.modal-body .entry.selected').forEach(e => e.classList.remove('selected'));
+    el.classList.add('selected');
+    browseSelected = path;
+    document.getElementById('selectBtn').disabled = false;
+  }
+
+  function confirmSelection() {
+    if (browseSelected && browseTarget) {
+      const el = document.getElementById(browseTarget + 'Path');
+      el.value = browseSelected;
+      files[browseTarget] = browseSelected;
+      sendFiles();
+    }
+    closeModal();
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+  function escapeAttr(s) {
+    return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+  }
+
+  // Close modal on overlay click
+  document.getElementById('fileModal').addEventListener('click', e => {
+    if (e.target.id === 'fileModal') closeModal();
+  });
+
+  // Close modal on Escape
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeModal();
+  });
+
+  // ── Transport ──────────────────────────────────────────
+  function togglePlayPause() {
+    if (!playing) {
+      fetch('/api/play', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          if (d.ok) {
+            playing = true;
+            document.getElementById('playPauseBtn').textContent = '⏸ Pause';
+            startPolling();
+          }
+        });
+    } else {
+      fetch('/api/pause', { method: 'POST' });
+    }
+  }
+
+  function stopPlayback() {
+    fetch('/api/stop', { method: 'POST' }).then(() => {
+      playing = false;
+      document.getElementById('playPauseBtn').textContent = '▶ Play';
+      document.getElementById('seekBar').value = 0;
+      document.getElementById('timeElapsed').textContent = '0:00';
+      document.getElementById('timeTotal').textContent = '0:00';
+      stopPolling();
+    });
+  }
+
+  function exitApp() {
+    if (!confirm('Stop playback and exit the server?')) return;
+    fetch('/api/exit', { method: 'POST' }).finally(() => {
+      document.body.innerHTML = '<div style="display:flex;justify-content:center;align-items:center;height:100vh;color:#eee;font-family:sans-serif;"><h2>Server shut down.</h2></div>';
+    });
+  }
+
+  // ── Seek bar ───────────────────────────────────────────
+  const seekBar = document.getElementById('seekBar');
+  seekBar.addEventListener('input', () => { seeking = true; });
+  seekBar.addEventListener('change', () => {
+    const pos = (seekBar.value / 100) * (state.duration || 0);
+    fetch('/api/seek', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ position: pos }),
+    }).finally(() => { seeking = false; });
+  });
+
+  // ── Vocal volume ───────────────────────────────────────
+  const vocalVol = document.getElementById('vocalVol');
+  vocalVol.addEventListener('input', () => {
+    document.getElementById('vocalVolVal').textContent = parseFloat(vocalVol.value).toFixed(2);
+  });
+  vocalVol.addEventListener('change', () => {
+    fetch('/api/volume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ volume: parseFloat(vocalVol.value) }),
+    });
+  });
+
+  // ── Pitch ──────────────────────────────────────────────
+  const pitchSlider = document.getElementById('pitchSlider');
+  const SEMITONE_LABELS = {
+    '-6': '−6 st', '-5': '−5 st', '-4': '−4 st', '-3': '−3 st',
+    '-2': '−2 st', '-1': '−1 st',  '0': '0 st',  '1': '+1 st',
+     '2': '+2 st',  '3': '+3 st',  '4': '+4 st',  '5': '+5 st',
+     '6': '+6 st',
+  };
+  pitchSlider.addEventListener('input', () => {
+    const st = parseInt(pitchSlider.value);
+    document.getElementById('pitchVal').textContent = SEMITONE_LABELS[String(st)] || `${st > 0 ? '+' : ''}${st} st`;
+  });
+  pitchSlider.addEventListener('change', () => {
+    const st = parseInt(pitchSlider.value);
+    fetch('/api/pitch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ semitones: st }),
+    });
+  });
+
+  // ── Polling for position ───────────────────────────────
+  let state = { position: 0, duration: 0 };
+
+  function startPolling() {
+    if (pollInterval) return;
+    pollInterval = setInterval(() => {
+      fetch('/api/status')
+        .then(r => r.json())
+        .then(d => {
+          state.position = d.position || 0;
+          state.duration = d.duration || 0;
+          if (!seeking && state.duration > 0) {
+            seekBar.value = (state.position / state.duration) * 100;
+          }
+          document.getElementById('timeElapsed').textContent = fmtTime(state.position);
+          document.getElementById('timeTotal').textContent = fmtTime(state.duration);
+        });
+    }, 500);
+  }
+
+  function stopPolling() {
+    clearInterval(pollInterval);
+    pollInterval = null;
+  }
+
+  function fmtTime(s) {
+    if (!s || s <= 0) return '0:00';
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return `${m}:${sec.toString().padStart(2, '0')}`;
+  }
+</script>
+</body>
+</html>

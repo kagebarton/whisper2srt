@@ -1,0 +1,32 @@
+mpv video.mp4 \
+    --audio-file=vocal.m4a \
+    --audio-file=nonvocal.m4a \
+    --lavfi-complex="[aid2]volume@vocalvol=0.3[vocal];[aid3]volume@nonvocalvol=1.0[nonvocal];[vocal][nonvocal]amix=inputs=2:normalize=0[mixed];[mixed]rubberband@rb=pitch=1.0:formant=preserved[ao]" \
+    --input-ipc-server=/tmp/mpv-socket
+
+
+echo '{"command":["set_property","lavfi-complex","[aid2]volume@vocalvol=0.5[vocal];[aid3]volume@nonvocalvol=1.0[nonvocal];[vocal][nonvocal]amix=inputs=2:normalize=0[mixed];[mixed]rubberband@rb=pitch=1.1225:formant=preserved[ao]"]}' | socat - /tmp/mpv-socket
+
+
+mpv video.mp4 \
+    --audio-file=vocal.m4a \
+    --audio-file=nonvocal.m4a \
+    --lavfi-complex="\
+    [aid2]volume@vocalvol=0.3,\
+    rubberband@vocalrb=pitch=0.994\
+    :window=long\
+    :pitchq=quality\
+    :transients=crisp\
+    :detector=compound\
+    :formant=preserved\
+    [vocal];\
+    [aid3]volume@nonvocalvol=1.0,\
+    rubberband@nonvocalrb=pitch=0.994\
+    :window=standard\
+    :pitchq=consistency\
+    :transients=crisp\
+    :detector=compound\
+    :formant=shifted\
+    [nonvocal];\
+    [vocal][nonvocal]amix=inputs=2:normalize=0[ao]" \
+    --input-ipc-server=/tmp/mpv-socket
