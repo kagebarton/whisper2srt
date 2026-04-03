@@ -280,6 +280,11 @@
     <input type="text" id="nonvocalPath" placeholder="Paste path or click Browse…" value="{{ state.nonvocal_path or '' }}">
     <button onclick="openBrowser('nonvocal')">📂 Browse</button>
   </div>
+  <div class="file-row">
+    <label>Subtitles</label>
+    <input type="text" id="subtitlePath" placeholder="Optional .srt / .ass path" value="{{ state.subtitle_path or '' }}">
+    <button onclick="openBrowser('subtitle')">📂 Browse</button>
+  </div>
 
   <!-- Transport -->
   <div class="transport">
@@ -308,6 +313,13 @@
     <input type="range" id="pitchSlider" min="-6" max="6" step="1" value="{{ state.semitones }}">
     <span class="val" id="pitchVal">{{ '%+d st' % state.semitones if state.semitones else '0 st' }}</span>
   </div>
+
+  <!-- Subtitle delay -->
+  <div class="slider-row">
+    <label>Sub Delay</label>
+    <input type="range" id="subDelaySlider" min="-5000" max="5000" step="50" value="{{ (state.subtitle_delay * 1000) | int }}">
+    <span class="val" id="subDelayVal">{{ '%+.1fs' % state.subtitle_delay if state.subtitle_delay else '0.0s' }}</span>
+  </div>
 </div>
 
 <!-- File browser modal -->
@@ -332,6 +344,7 @@
     video: document.getElementById('videoPath').value || null,
     vocal: document.getElementById('vocalPath').value || null,
     nonvocal: document.getElementById('nonvocalPath').value || null,
+    subtitle: document.getElementById('subtitlePath').value || null,
   };
   let playing = document.getElementById('playPauseBtn').textContent.includes('Pause');
   let seeking = false;
@@ -346,7 +359,7 @@
   let browseEntries = [];        // current directory entries
 
   // ── Text fields → send paths on change ─────────────────
-  ['video', 'vocal', 'nonvocal'].forEach(kind => {
+  ['video', 'vocal', 'nonvocal', 'subtitle'].forEach(kind => {
     const el = document.getElementById(kind + 'Path');
     el.addEventListener('change', () => {
       files[kind] = el.value.trim() || null;
@@ -416,11 +429,10 @@
     browseEntries.forEach((entry, i) => {
       const icon = entry.is_dir ? '📁' : '📄';
       const iconClass = entry.is_dir ? 'icon dir' : 'icon';
-      const cls = entry.is_dir ? '' : '' ;
       const clickHandler = entry.is_dir
         ? `onclick="navigateTo('${escapeAttr(entry.path)}')"`
         : `onclick="selectFile('${escapeAttr(entry.path)}', this)"`;
-      html += `<div class="entry ${cls}" data-idx="${i}" ${clickHandler}>
+      html += `<div class="entry" data-idx="${i}" ${clickHandler}>
         <span class="${iconClass}">${icon}</span>
         <span class="name">${escapeHtml(entry.name)}</span>
       </div>`;
@@ -542,6 +554,24 @@
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ semitones: st }),
+    });
+  });
+
+  // ── Subtitle delay ─────────────────────────────────────
+  const subDelaySlider = document.getElementById('subDelaySlider');
+  function fmtDelay(ms) {
+    const s = ms / 1000;
+    return `${s >= 0 ? '+' : ''}${s.toFixed(1)}s`;
+  }
+  subDelaySlider.addEventListener('input', () => {
+    document.getElementById('subDelayVal').textContent = fmtDelay(parseInt(subDelaySlider.value));
+  });
+  subDelaySlider.addEventListener('change', () => {
+    const delaySec = parseInt(subDelaySlider.value) / 1000;
+    fetch('/api/sub_delay', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delay: delaySec }),
     });
   });
 

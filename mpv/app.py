@@ -1,5 +1,6 @@
 import os
 import json
+import signal
 import subprocess
 import socket
 import threading
@@ -12,6 +13,7 @@ app = Flask(__name__)
 # ── State ──────────────────────────────────────────────────────────────────────
 IPC_SOCKET = "/tmp/mpv-socket"
 NONVOCAL_VOL = 1.0  # fixed
+QR_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qrcode.png")
 
 def semitones_to_pitch(st):
     """Convert semitone offset to MPV rubberband pitch multiplier."""
@@ -21,6 +23,8 @@ state = {
     "video_path": None,
     "vocal_path": None,
     "nonvocal_path": None,
+    "subtitle_path": None,
+    "subtitle_delay": 0.0,       # seconds, positive = delay, negative = advance
     "vocal_volume": 1.0,
     "semitones": 0,            # -6 to +6, mapped to pitch via 2^(st/12)
     "playing": False,
@@ -36,8 +40,12 @@ poll_stop = threading.Event()
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def build_filter_complex(vocal_vol, pitch):
-    """Rebuild the lavfi-complex string with per-track rubberband settings."""
+    """Rebuild the lavfi-complex string with per-track rubberband settings and QR overlay."""
     return (
+        # QR code overlay: loop the single-frame PNG and overlay on video
+        f'movie={QR_CODE},loop=loop=-1:size=1[qr];'
+        f'[vid1][qr]overlay=0:0[vo];'
+        # Vocal stem: volume + pitch shift (formant-preserved for voice)
         f'[aid2]volume@vocalvol={vocal_vol},'
         f'rubberband@vocalrb=pitch={pitch}'
         f':window=long'
@@ -47,6 +55,7 @@ def build_filter_complex(vocal_vol, pitch):
         f':formant=preserved'
         f':channels=together'
         f'[vocal];'
+        # Non-vocal stem: fixed volume + pitch shift (formant-shifted for instruments)
         f'[aid3]volume@nonvocalvol={NONVOCAL_VOL},'
         f'rubberband@nonvocalrb=pitch={pitch}'
         f':window=standard'
@@ -87,6 +96,8 @@ def launch_mpv():
         f'--input-ipc-server={IPC_SOCKET}',
         "--no-terminal",
     ]
+    if state["subtitle_path"]:
+        cmd.insert(2, f'--sub-file={state["subtitle_path"]}')
     mpv_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # give MPV a moment to create the socket
     time.sleep(0.5)
@@ -111,8 +122,16 @@ def stop_mpv():
 
 
 def poll_position():
-    """Periodically query MPV for time-pos and duration."""
+    """Periodically query MPV for time-pos and duration. Clears playing state if MPV exits."""
     while not poll_stop.is_set():
+        # If MPV exited naturally (song ended), reset state
+        if mpv_proc is not None and mpv_proc.poll() is not None:
+            state["playing"] = False
+            state["position"] = 0.0
+            state["duration"] = 0.0
+            poll_stop.set()
+            break
+
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
                 s.connect(IPC_SOCKET)
@@ -154,6 +173,7 @@ def set_files():
     state["video_path"] = data.get("video")
     state["vocal_path"] = data.get("vocal")
     state["nonvocal_path"] = data.get("nonvocal")
+    state["subtitle_path"] = data.get("subtitle")
     return jsonify({"ok": True})
 
 
@@ -168,6 +188,8 @@ def play():
     state["playing"] = True
     poll_stop.clear()
     global poll_thread
+    if poll_thread is not None:
+        poll_thread.join(timeout=1)
     poll_thread = threading.Thread(target=poll_position, daemon=True)
     poll_thread.start()
     return jsonify({"ok": True})
@@ -201,8 +223,6 @@ def exit_app():
         func()
     else:
         # Fallback for Werkzeug >= 2.1 (shutdown removed)
-        import signal
-        import os
         os.kill(os.getpid(), signal.SIGINT)
     return jsonify({"ok": True})
 
@@ -235,6 +255,16 @@ def set_pitch():
     return jsonify({"ok": True})
 
 
+@app.route("/api/sub_delay", methods=["POST"])
+def set_sub_delay():
+    """Set subtitle delay in seconds (positive = delay, negative = advance)."""
+    delay = request.json.get("delay", 0)
+    state["subtitle_delay"] = float(delay)
+    if state["playing"]:
+        send_mpv_command({"command": ["set_property", "sub-delay", float(delay)]})
+    return jsonify({"ok": True})
+
+
 @app.route("/api/status", methods=["GET"])
 def status():
     return jsonify({
@@ -243,6 +273,7 @@ def status():
         "duration": state["duration"],
         "vocal_volume": state["vocal_volume"],
         "semitones": state["semitones"],
+        "subtitle_delay": state["subtitle_delay"],
     })
 
 
