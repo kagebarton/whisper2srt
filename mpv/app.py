@@ -15,15 +15,21 @@ IPC_SOCKET = "/tmp/mpv-socket"
 NONVOCAL_VOL = 1.0  # fixed
 QR_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qrcode.png")
 
+SONG_DIR = "/home/ken/whisper2srt/song"
+DEFAULT_VIDEO    = os.path.join(SONG_DIR, "selfish.mp4")
+DEFAULT_VOCAL    = os.path.join(SONG_DIR, "selfish---vocal.m4a")
+DEFAULT_NONVOCAL = os.path.join(SONG_DIR, "selfish---nonvocal.m4a")
+DEFAULT_SUBTITLE = os.path.join(SONG_DIR, "selfish---vocal.ass")
+
 def semitones_to_pitch(st):
     """Convert semitone offset to MPV rubberband pitch multiplier."""
     return 2 ** (st / 12)
 
 state = {
-    "video_path": None,
-    "vocal_path": None,
-    "nonvocal_path": None,
-    "subtitle_path": None,
+    "video_path": DEFAULT_VIDEO,
+    "vocal_path": DEFAULT_VOCAL,
+    "nonvocal_path": DEFAULT_NONVOCAL,
+    "subtitle_path": DEFAULT_SUBTITLE,
     "subtitle_delay": 0.0,       # seconds, positive = delay, negative = advance
     "vocal_volume": 1.0,
     "semitones": 0,            # -6 to +6, mapped to pitch via 2^(st/12)
