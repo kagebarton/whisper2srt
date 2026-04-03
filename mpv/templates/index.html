@@ -493,15 +493,23 @@
     }
   }
 
+  function resetUI() {
+    playing = false;
+    document.getElementById('playPauseBtn').textContent = '▶ Play';
+    document.getElementById('seekBar').value = 0;
+    document.getElementById('timeElapsed').textContent = '0:00';
+    document.getElementById('timeTotal').textContent = '0:00';
+    vocalVol.value = 1.0;
+    document.getElementById('vocalVolVal').textContent = '1.00';
+    pitchSlider.value = 0;
+    document.getElementById('pitchVal').textContent = '0 st';
+    subDelaySlider.value = 0;
+    document.getElementById('subDelayVal').textContent = '+0.0s';
+    stopPolling();
+  }
+
   function stopPlayback() {
-    fetch('/api/stop', { method: 'POST' }).then(() => {
-      playing = false;
-      document.getElementById('playPauseBtn').textContent = '▶ Play';
-      document.getElementById('seekBar').value = 0;
-      document.getElementById('timeElapsed').textContent = '0:00';
-      document.getElementById('timeTotal').textContent = '0:00';
-      stopPolling();
-    });
+    fetch('/api/stop', { method: 'POST' }).then(() => resetUI());
   }
 
   function exitApp() {
@@ -584,6 +592,10 @@
       fetch('/api/status')
         .then(r => r.json())
         .then(d => {
+          if (playing && !d.playing) {
+            resetUI();
+            return;
+          }
           state.position = d.position || 0;
           state.duration = d.duration || 0;
           if (!seeking && state.duration > 0) {
