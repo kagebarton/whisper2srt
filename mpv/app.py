@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 from pathlib import Path
+import qrcode
 from PIL import Image, ImageDraw, ImageFont
 from flask import Flask, render_template, request, jsonify
 
@@ -16,6 +17,7 @@ IPC_SOCKET = "/tmp/mpv-socket"
 NONVOCAL_VOL = 1.0  # fixed
 QR_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qrcode.png")
 PLACEHOLDER_PNG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "placeholder.png")
+NOWPLAYING_OVERLAY_PATH = "/tmp/nowplaying_overlay.bgra"
 
 SONG_DIR = "/home/ken/whisper2srt/song"
 DEFAULT_VIDEO    = os.path.join(SONG_DIR, "selfish.mp4")
@@ -38,21 +40,93 @@ state = {
     "playing": False,
     "duration": 0.0,
     "position": 0.0,
+    "playing_video_path": None,   # tracks what is currently loaded in MPV
 }
 
 mpv_proc = None
 poll_thread = None
 poll_stop = threading.Event()
 
+# Persistent socket for overlay commands (overlay-add and osd-overlay are client-scoped;
+# MPV removes them when the connection that created them closes).
+_overlay_sock = None
+_overlay_sock_lock = threading.Lock()
+
+
+def _get_overlay_sock():
+    """Return the persistent overlay socket, creating it if needed."""
+    global _overlay_sock
+    if _overlay_sock is not None:
+        return _overlay_sock
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(IPC_SOCKET)
+        _overlay_sock = s
+        return s
+    except OSError:
+        return None
+
+
+def send_overlay_command(cmd_dict):
+    """Send an overlay/OSD command over the persistent socket (with one reconnect retry)."""
+    global _overlay_sock
+    with _overlay_sock_lock:
+        for _ in range(2):
+            s = _get_overlay_sock()
+            if s is None:
+                return
+            try:
+                payload = json.dumps(cmd_dict).encode() + b'\n'
+                print(f"[OVERLAY TX] {payload[:200]}")
+                s.sendall(payload)
+                s.settimeout(1.0)
+                # Read until we get a command response (skip event notifications)
+                buf = b""
+                for _ in range(10):
+                    try:
+                        buf += s.recv(4096)
+                    except socket.timeout:
+                        break
+                    # Parse each newline-delimited JSON message
+                    while b'\n' in buf:
+                        line, buf = buf.split(b'\n', 1)
+                        line = line.strip()
+                        if not line:
+                            continue
+                        print(f"[OVERLAY RX] {line}")
+                        try:
+                            msg = json.loads(line)
+                            if "error" in msg or "request_id" in msg:
+                                return  # got the command response
+                        except json.JSONDecodeError:
+                            pass
+                print(f"[OVERLAY RX] no command response found, buf={buf[:200]}")
+                return
+            except OSError:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+                _overlay_sock = None
+
+
+def close_overlay_sock():
+    """Close the persistent overlay socket on shutdown."""
+    global _overlay_sock
+    with _overlay_sock_lock:
+        if _overlay_sock is not None:
+            try:
+                _overlay_sock.close()
+            except OSError:
+                pass
+            _overlay_sock = None
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def build_filter_complex(vocal_vol, pitch):
-    """Rebuild the lavfi-complex string with per-track rubberband settings and QR overlay."""
+    """Rebuild the lavfi-complex string with per-track rubberband settings."""
     return (
-        # QR code overlay: loop the single-frame PNG and overlay on video
-        f'movie={QR_CODE},loop=loop=-1:size=1[qr];'
-        f'[vid1][qr]overlay=0:0[vo];'
         # Vocal stem: volume + pitch shift (formant-preserved for voice)
         f'[aid2]volume@vocalvol={vocal_vol},'
         f'rubberband@vocalrb=pitch={pitch}'
@@ -136,6 +210,8 @@ def end_song():
     send_mpv_command({"command": ["set_property", "lavfi-complex", ""]})
     load_placeholder()
     reset_state_defaults()
+    hide_qr_overlay()
+    send_nowplaying_overlay()
     poll_stop.set()
 
 
@@ -164,11 +240,13 @@ def start_mpv():
     # give MPV a moment to create the socket
     time.sleep(0.5)
     load_placeholder()
+    ensure_qr_png()
 
 
 def quit_mpv():
     """Tell MPV to quit and clean up the socket file."""
     global mpv_proc
+    close_overlay_sock()
     if mpv_proc is not None:
         send_mpv_command({"command": ["quit"]})
         try:
@@ -182,6 +260,195 @@ def quit_mpv():
             os.unlink(IPC_SOCKET)
         except OSError:
             pass
+
+
+def get_server_url():
+    """Discover the local IP address and return the server URL."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        ip = "localhost"
+    return f"http://{ip}:5000"
+
+
+def get_filename_prefix(path):
+    """Strip the filename to the part before '---' (e.g. 'selfish---vocal.m4a' -> 'selfish')."""
+    if not path:
+        return ""
+    return Path(path).stem.split("---")[0]
+
+
+def ensure_qr_png():
+    """Generate qrcode.png with the current server URL."""
+    url = get_server_url()
+    qr = qrcode.QRCode(version=1, box_size=10, border=2)
+    qr.add_data(url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    img.save(QR_CODE)
+
+
+def hide_qr_overlay():
+    """Remove the QR overlay."""
+    send_overlay_command({"command": ["overlay-remove", 0]})
+
+
+def send_qr_overlay():
+    """Send the QR code + URL text as a persistent overlay via overlay-add."""
+    # Query OSD height for sizing
+    resp = send_mpv_query({"command": ["get_property", "osd-height"]})
+    screen_h = resp.get("data") if resp and resp.get("data") is not None else 1080
+    qr_h = max(120, screen_h // 6)
+
+    # Open QR code image and resize
+    qr_img = Image.open(QR_CODE).convert("RGBA").resize((qr_h, qr_h))
+
+    # Render URL text beside it
+    url_text = get_server_url()
+    font = ImageFont.load_default(size=qr_h // 4.5)
+    # Try DejaVuSans fallback
+    for font_path in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                      "/usr/share/fonts/TTF/DejaVuSans.ttf"]:
+        try:
+            font = ImageFont.truetype(font_path, qr_h // 4.5)
+            break
+        except (OSError, IOError):
+            pass
+
+    draw = ImageDraw.Draw(qr_img)
+    bbox = draw.textbbox((0, 0), url_text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    # Compose combined RGBA image: QR on left, transparent background, URL text top-aligned to QR
+    gap = qr_h // 8
+    combined_w = qr_h + gap + text_w
+    combined_h = qr_h
+    combined = Image.new("RGBA", (combined_w, combined_h), (0, 0, 0, 0))
+    combined.paste(qr_img, (0, 0))
+
+    # Draw text top-aligned with the QR code
+    text_draw = ImageDraw.Draw(combined)
+    text_draw.text((qr_h + gap, 0), url_text, fill=(255, 255, 255, 255), font=font,
+                   stroke_width=2, stroke_fill=(0, 0, 0, 255))
+
+    # Convert RGBA -> BGRA (swap R and B channels) for mpv overlay format
+    r, g, b, a = combined.split()
+    bgra = Image.merge("RGBA", (b, g, r, a))
+    bgra_bytes = bgra.tobytes()
+
+    # Write raw BGRA bytes to temp file
+    overlay_path = "/tmp/qr_overlay.bgra"
+    with open(overlay_path, "wb") as f:
+        f.write(bgra_bytes)
+
+    # Send overlay-add command (fmt="bgra" is required between offset and w)
+    send_overlay_command({
+        "command": ["overlay-add", 0, 0, 0, overlay_path, 0, "bgra", combined_w, combined_h, combined_w * 4]
+    })
+
+
+def send_nowplaying_overlay():
+    """Render Now Playing / Up Next as a bitmap overlay (ID 1, upper-right)."""
+    if not state["playing"]:
+        send_overlay_command({"command": ["overlay-remove", 1]})
+        return
+
+    # Gather text
+    name = get_filename_prefix(state.get("playing_video_path", ""))
+    st = state["semitones"]
+    st_str = f"+{st}st" if st > 0 else f"{st}st"
+    vol_pct = int(state["vocal_volume"] * 100)
+
+    next_path = state["video_path"]
+    show_up_next = next_path and next_path != state.get("playing_video_path")
+    next_name = get_filename_prefix(next_path) if show_up_next else ""
+
+    lines = [
+        (f"Now Playing: {name}", 30, (255, 255, 255, 255)),
+        (f"Transpose: {st_str}  |  Vocals: {vol_pct}%", 22, (204, 204, 204, 255)),
+    ]
+    if show_up_next:
+        lines.append((f"Up Next: {next_name}", 24, (255, 255, 255, 255)))
+
+    # Query screen dimensions for positioning
+    resp = send_mpv_query({"command": ["get_property", "osd-width"]})
+    screen_w = resp.get("data") if resp and resp.get("data") else 1920
+    resp = send_mpv_query({"command": ["get_property", "osd-height"]})
+    screen_h = resp.get("data") if resp and resp.get("data") else 1080
+
+    # Font cache
+    font_cache = {}
+    def get_font(size):
+        if size not in font_cache:
+            for font_path in ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                              "/usr/share/fonts/TTF/DejaVuSans.ttf"]:
+                try:
+                    font_cache[size] = ImageFont.truetype(font_path, size)
+                    break
+                except (OSError, IOError):
+                    pass
+            else:
+                font_cache[size] = ImageFont.load_default(size=size)
+        return font_cache[size]
+
+    # Measure all lines
+    margin = 10
+    line_spacing = 6
+    dummy = Image.new("RGBA", (1, 1))
+    draw = ImageDraw.Draw(dummy)
+
+    line_metrics = []
+    max_w = 0
+    total_h = 0
+    for text, size, color in lines:
+        font = get_font(size)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        line_metrics.append((text, font, color, w, h))
+        max_w = max(max_w, w)
+        total_h += h + line_spacing
+    total_h -= line_spacing
+
+    img_w = max_w + margin * 2
+    img_h = total_h + margin * 2
+
+    # Render text with black outline for readability
+    img = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+    text_draw = ImageDraw.Draw(img)
+    y = margin
+    for text, font, color, w, h in line_metrics:
+        x = img_w - margin - w
+        # Draw black outline
+        for dx in (-2, -1, 0, 1, 2):
+            for dy in (-2, -1, 0, 1, 2):
+                if dx == 0 and dy == 0:
+                    continue
+                text_draw.text((x + dx, y + dy), text, fill=(0, 0, 0, 255), font=font)
+        # Draw main text
+        text_draw.text((x, y), text, fill=color, font=font)
+        y += h + line_spacing
+
+    # Convert RGBA -> BGRA
+    r, g, b, a = img.split()
+    bgra = Image.merge("RGBA", (b, g, r, a))
+
+    with open(NOWPLAYING_OVERLAY_PATH, "wb") as f:
+        f.write(bgra.tobytes())
+
+    # Position: upper-right corner
+    overlay_x = screen_w - img_w
+    overlay_y = 20
+
+    send_overlay_command({
+        "command": ["overlay-add", 1, overlay_x, overlay_y,
+                    NOWPLAYING_OVERLAY_PATH, 0, "bgra", img_w, img_h, img_w * 4]
+    })
 
 
 def poll_position():
@@ -219,6 +486,7 @@ def set_files():
     state["vocal_path"] = data.get("vocal")
     state["nonvocal_path"] = data.get("nonvocal")
     state["subtitle_path"] = data.get("subtitle")
+    send_nowplaying_overlay()
     return jsonify({"ok": True})
 
 
@@ -255,12 +523,15 @@ def play():
         send_mpv_command({"command": ["sub-add", state["subtitle_path"]]})
 
     state["playing"] = True
+    state["playing_video_path"] = state["video_path"]
     poll_stop.clear()
     global poll_thread
     if poll_thread is not None:
         poll_thread.join(timeout=1)
     poll_thread = threading.Thread(target=poll_position, daemon=True)
     poll_thread.start()
+    send_qr_overlay()
+    send_nowplaying_overlay()
     return jsonify({"ok": True})
 
 
@@ -309,6 +580,7 @@ def set_volume():
     if state["playing"]:
         fc = build_filter_complex(state["vocal_volume"], semitones_to_pitch(state["semitones"]))
         send_mpv_command({"command": ["set_property", "lavfi-complex", fc]})
+    send_nowplaying_overlay()
     return jsonify({"ok": True})
 
 
@@ -319,6 +591,7 @@ def set_pitch():
     if state["playing"]:
         fc = build_filter_complex(state["vocal_volume"], semitones_to_pitch(state["semitones"]))
         send_mpv_command({"command": ["set_property", "lavfi-complex", fc]})
+    send_nowplaying_overlay()
     return jsonify({"ok": True})
 
 
