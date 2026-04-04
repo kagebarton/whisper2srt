@@ -397,7 +397,7 @@ def send_nowplaying_overlay():
         return font_cache[size]
 
     # Measure all lines
-    margin = 10
+    margin = 0
     line_spacing = 6
     dummy = Image.new("RGBA", (1, 1))
     draw = ImageDraw.Draw(dummy)
@@ -442,8 +442,8 @@ def send_nowplaying_overlay():
         f.write(bgra.tobytes())
 
     # Position: upper-right corner
-    overlay_x = screen_w - img_w
-    overlay_y = 20
+    overlay_x = screen_w - img_w - 0
+    overlay_y = 0
 
     send_overlay_command({
         "command": ["overlay-add", 1, overlay_x, overlay_y,
