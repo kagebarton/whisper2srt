@@ -452,7 +452,10 @@ def send_nowplaying_overlay():
 
 
 def poll_position():
-    """Periodically query MPV for time-pos and duration. Checks idle-active for song-end detection."""
+    """Periodically query MPV for time-pos and duration. Checks idle-active for song-end detection.
+    Also monitors osd-width/osd-height changes and re-positions overlays on resize."""
+    last_osd_w = None
+    last_osd_h = None
     while not poll_stop.is_set():
         # Check if MPV went idle (song ended naturally)
         idle_resp = send_mpv_query({"command": ["get_property", "idle-active"]})
@@ -467,6 +470,19 @@ def poll_position():
         resp = send_mpv_query({"command": ["get_property", "duration"]})
         if resp and resp.get("data") is not None:
             state["duration"] = float(resp["data"])
+
+        # Detect window resize via OSD dimension change
+        resp = send_mpv_query({"command": ["get_property", "osd-width"]})
+        cur_w = resp.get("data") if resp and resp.get("data") is not None else None
+        resp = send_mpv_query({"command": ["get_property", "osd-height"]})
+        cur_h = resp.get("data") if resp and resp.get("data") is not None else None
+
+        if cur_w is not None and cur_h is not None:
+            if cur_w != last_osd_w or cur_h != last_osd_h:
+                last_osd_w, last_osd_h = cur_w, cur_h
+                if state["playing"]:
+                    send_qr_overlay()
+                    send_nowplaying_overlay()
 
         poll_stop.wait(0.5)
 
