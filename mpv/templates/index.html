@@ -316,14 +316,14 @@
   <!-- Vocal volume -->
   <div class="slider-row">
     <label>Vocal Volume</label>
-    <input type="range" id="vocalVol" min="0" max="2" step="0.01" value="{{ state.vocal_volume }}">
-    <span class="val" id="vocalVolVal">{{ '%.2f' % state.vocal_volume }}</span>
+    <input type="range" id="vocalVol" min="0" max="100" step="1" value="{{ (state.vocal_volume * 100) | int }}">
+    <span class="val" id="vocalVolVal">{{ '%d%%' % (state.vocal_volume * 100) }}</span>
   </div>
 
   <!-- Pitch -->
   <div class="slider-row">
     <label>Pitch</label>
-    <input type="range" id="pitchSlider" min="-6" max="6" step="1" value="{{ state.semitones }}">
+    <input type="range" id="pitchSlider" min="-3" max="3" step="1" value="{{ state.semitones }}">
     <span class="val" id="pitchVal">{{ '%+d st' % state.semitones if state.semitones else '0 st' }}</span>
   </div>
 
@@ -547,23 +547,21 @@
   // ── Vocal volume ───────────────────────────────────────
   const vocalVol = document.getElementById('vocalVol');
   vocalVol.addEventListener('input', () => {
-    document.getElementById('vocalVolVal').textContent = parseFloat(vocalVol.value).toFixed(2);
+    document.getElementById('vocalVolVal').textContent = `${vocalVol.value}%`;
   });
   vocalVol.addEventListener('change', () => {
     fetch('/api/volume', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ volume: parseFloat(vocalVol.value) }),
+      body: JSON.stringify({ volume: parseInt(vocalVol.value) }),
     });
   });
 
   // ── Pitch ──────────────────────────────────────────────
   const pitchSlider = document.getElementById('pitchSlider');
   const SEMITONE_LABELS = {
-    '-6': '−6 st', '-5': '−5 st', '-4': '−4 st', '-3': '−3 st',
-    '-2': '−2 st', '-1': '−1 st',  '0': '0 st',  '1': '+1 st',
-     '2': '+2 st',  '3': '+3 st',  '4': '+4 st',  '5': '+5 st',
-     '6': '+6 st',
+    '-3': '−3 st', '-2': '−2 st', '-1': '−1 st',  '0': '0 st',
+     '1': '+1 st',  '2': '+2 st',  '3': '+3 st',
   };
   pitchSlider.addEventListener('input', () => {
     const st = parseInt(pitchSlider.value);
