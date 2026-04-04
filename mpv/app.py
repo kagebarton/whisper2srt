@@ -34,7 +34,7 @@ state = {
     "subtitle_path": DEFAULT_SUBTITLE,
     "subtitle_delay": 0.0,       # seconds, positive = delay, negative = advance
     "vocal_volume": 1.0,
-    "semitones": 0,            # -6 to +6, mapped to pitch via 2^(st/12)
+    "semitones": 0,            # -3 to +3, mapped to pitch via 2^(st/12)
     "playing": False,
     "duration": 0.0,
     "position": 0.0,
@@ -304,8 +304,8 @@ def seek():
 
 @app.route("/api/volume", methods=["POST"])
 def set_volume():
-    vol = request.json.get("volume", 1.0)
-    state["vocal_volume"] = float(vol)
+    vol_pct = request.json.get("volume", 100)
+    state["vocal_volume"] = float(vol_pct) / 100.0
     if state["playing"]:
         fc = build_filter_complex(state["vocal_volume"], semitones_to_pitch(state["semitones"]))
         send_mpv_command({"command": ["set_property", "lavfi-complex", fc]})
