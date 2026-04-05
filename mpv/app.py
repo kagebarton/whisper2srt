@@ -7,10 +7,20 @@ import threading
 import time
 from pathlib import Path
 import qrcode
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageFont
 from flask import Flask, render_template, request, jsonify
 
 app = Flask(__name__)
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+SHOW_QR = True   # Show QR code + URL overlay pair (top-left)
+OVERLAY_MARGIN_TOP = 0   # px from top edge in ASS 1920x1080 space
+
+# ── OSD ID constants ───────────────────────────────────────────────────────────
+OSD_URL        = 1   # URL text, paired with QR bitmap, top-left
+OSD_NOWPLAYING = 2   # "Now Playing: <title>" line, top-right
+OSD_TIMECODE   = 3   # "1:23 / 3:45 | Transpose: +2 | Vocals: 80%" line, top-right
+OSD_UPNEXT     = 4   # "Up Next: <title>", top-right
 
 # ── State ──────────────────────────────────────────────────────────────────────
 IPC_SOCKET = "/tmp/mpv-socket"
@@ -107,6 +117,24 @@ def send_overlay_command(cmd_dict):
                 _overlay_sock = None
 
 
+def send_osd(overlay_id, data, res_x=1920, res_y=1080):
+    """Send an ASS event string to a specific OSD overlay slot."""
+    send_overlay_command({
+        "command": {"name": "osd-overlay", "id": overlay_id,
+                    "format": "ass-events", "data": data,
+                    "res_x": res_x, "res_y": res_y}
+    })
+
+
+def clear_osd(overlay_id, res_x=1920, res_y=1080):
+    """Clear a specific OSD overlay slot."""
+    send_overlay_command({
+        "command": {"name": "osd-overlay", "id": overlay_id,
+                    "format": "none", "data": "",
+                    "res_x": res_x, "res_y": res_y}
+    })
+
+
 def close_overlay_sock():
     """Close the persistent overlay socket on shutdown."""
     global _overlay_sock
@@ -176,24 +204,6 @@ def send_mpv_query(cmd_dict):
         return None
 
 
-def generate_placeholder():
-    """Create a placeholder PNG with logo.jpg centered on a black background."""
-    logo = Image.open(LOGO_JPG)
-    # Use 1280x720 canvas, scale logo to fit within it with padding
-    canvas_w, canvas_h = 1280, 720
-    # Scale logo to fit within 80% of canvas, preserving aspect ratio
-    max_w, max_h = int(canvas_w * 0.8), int(canvas_h * 0.8)
-    ratio = min(max_w / logo.width, max_h / logo.height)
-    new_w, new_h = int(logo.width * ratio), int(logo.height * ratio)
-    logo = logo.resize((new_w, new_h), Image.LANCZOS)
-
-    img = Image.new("RGB", (canvas_w, canvas_h), "black")
-    x = (canvas_w - new_w) // 2
-    y = (canvas_h - new_h) // 2
-    img.paste(logo, (x, y))
-    img.save(PLACEHOLDER_PNG)
-
-
 def load_placeholder():
     """Load the placeholder PNG into the running MPV instance."""
     send_mpv_command({"command": ["loadfile", PLACEHOLDER_PNG]})
@@ -205,7 +215,10 @@ def end_song():
     load_placeholder()
     reset_state_defaults()
     send_qr_overlay()
-    send_nowplaying_overlay()
+    send_url_overlay()
+    clear_osd(OSD_NOWPLAYING)
+    clear_osd(OSD_TIMECODE)
+    send_upnext_overlay()
     poll_stop.set()
 
 
@@ -238,7 +251,8 @@ def start_mpv():
     load_placeholder()
     ensure_qr_png()
     send_qr_overlay()
-    send_nowplaying_overlay()
+    send_url_overlay()
+    send_upnext_overlay()
 
 
 def quit_mpv():
@@ -296,51 +310,23 @@ def _overlay_font_size(screen_h=None):
     if screen_h is None:
         screen_h = 1080
     qr_h = max(120, screen_h // 6)
-    return qr_h // 4.5
+    return qr_h // 3
 
 
 def send_qr_overlay():
-    """Send the QR code + URL text as a persistent overlay via overlay-add."""
+    """Send the QR code bitmap as a persistent overlay via overlay-add (no URL text)."""
+    if not SHOW_QR:
+        return
     # Query OSD height for sizing
     resp = send_mpv_query({"command": ["get_property", "osd-height"]})
     screen_h = resp.get("data") if resp and resp.get("data") is not None else 1080
     qr_h = max(120, screen_h // 6)
-    font_size = _overlay_font_size(screen_h)
 
     # Open QR code image and resize
     qr_img = Image.open(QR_CODE).convert("RGBA").resize((qr_h, qr_h))
 
-    # Render URL text beside it
-    url_text = get_server_url()
-    font = ImageFont.load_default(size=font_size)
-    # Try DejaVuSans fallback
-    for font_path in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                      "/usr/share/fonts/TTF/DejaVuSans.ttf"]:
-        try:
-            font = ImageFont.truetype(font_path, font_size)
-            break
-        except (OSError, IOError):
-            pass
-
-    draw = ImageDraw.Draw(qr_img)
-    bbox = draw.textbbox((0, 0), url_text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
-
-    # Compose combined RGBA image: QR on left, transparent background, URL text top-aligned to QR
-    gap = qr_h // 8
-    combined_w = qr_h + gap + text_w
-    combined_h = qr_h
-    combined = Image.new("RGBA", (combined_w, combined_h), (0, 0, 0, 0))
-    combined.paste(qr_img, (0, 0))
-
-    # Draw text top-aligned with the QR code
-    text_draw = ImageDraw.Draw(combined)
-    text_draw.text((qr_h + gap, 0), url_text, fill=(255, 255, 255, 255), font=font,
-                   stroke_width=2, stroke_fill=(0, 0, 0, 255))
-
     # Convert RGBA -> BGRA (swap R and B channels) for mpv overlay format
-    r, g, b, a = combined.split()
+    r, g, b, a = qr_img.split()
     bgra = Image.merge("RGBA", (b, g, r, a))
     bgra_bytes = bgra.tobytes()
 
@@ -351,8 +337,42 @@ def send_qr_overlay():
 
     # Send overlay-add command (fmt="bgra" is required between offset and w)
     send_overlay_command({
-        "command": ["overlay-add", 0, 0, 0, overlay_path, 0, "bgra", combined_w, combined_h, combined_w * 4]
+        "command": ["overlay-add", 0, 0, 0, overlay_path, 0, "bgra", qr_h, qr_h, qr_h * 4]
     })
+
+
+def send_url_overlay():
+    """Send the server URL text as an OSD overlay, positioned to the right of the QR image."""
+    if not SHOW_QR:
+        clear_osd(OSD_URL)
+        return
+    # Query screen height for sizing (same as QR uses)
+    resp = send_mpv_query({"command": ["get_property", "osd-height"]})
+    screen_h = resp.get("data") if resp and resp.get("data") is not None else 1080
+    resp_w = send_mpv_query({"command": ["get_property", "osd-width"]})
+    screen_w = resp_w.get("data") if resp_w and resp_w.get("data") is not None else 1920
+
+    qr_h = max(120, screen_h // 6)
+    font_size = _overlay_font_size(screen_h)
+
+    # Try DejaVuSans font, fall back to default
+    font = ImageFont.load_default(size=font_size)
+    for font_path in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                      "/usr/share/fonts/TTF/DejaVuSans.ttf"]:
+        try:
+            font = ImageFont.truetype(font_path, font_size)
+            break
+        except (OSError, IOError):
+            pass
+
+    url_text = get_server_url()
+    # Position to the right of QR (with 5px gap), vertically aligned to top.
+    # Convert actual pixel coordinates to ASS 1920x1080 space.
+    x = (qr_h + 10) * 1920 / screen_w
+    y = OVERLAY_MARGIN_TOP
+    # \an7 = top-left anchor (same top-edge semantics as \an9 for Now Playing)
+    data = f"{{\\an7\\pos({x},{y})\\fs{font_size}\\bord2\\c&HFFFFFF&}}{url_text}"
+    send_osd(OSD_URL, data)
 
 
 def _fmt_time(seconds):
@@ -361,51 +381,58 @@ def _fmt_time(seconds):
     return f"{m}:{s:02d}"
 
 
-def send_nowplaying_overlay():
-    """Send Now Playing / Up Next display via osd-overlay (ASS events, ID 1).
-    Uses command-as-object format: {"command": {"name": "osd-overlay", ...}}"""
-    # Query screen height for dynamic font sizing
+def _osd_screen_h():
+    """Query MPV osd-height, defaulting to 1080 on failure."""
     resp = send_mpv_query({"command": ["get_property", "osd-height"]})
-    screen_h = resp.get("data") if resp and resp.get("data") is not None else 1080
-    fs_title = _overlay_font_size(screen_h)
+    return resp.get("data") if resp and resp.get("data") is not None else 1080
 
-    next_path = state["video_path"]
-    show_up_next = next_path and next_path != state.get("playing_video_path")
-    next_name = get_filename_prefix(next_path) if show_up_next else ""
 
+def send_nowplaying_overlay():
+    """Send 'Now Playing: <title>' line via osd-overlay (OSD_NOWPLAYING, ID 2).
+    Displays the title only; clears if not playing."""
     if not state["playing"]:
-        if show_up_next:
-            data = f"{{\\an9\\fs24\\bord2\\c&HFFFFFF&}}Up Next: {next_name}"
-            send_overlay_command({
-                "command": {"name": "osd-overlay", "id": 1, "format": "ass-events",
-                            "data": data, "res_x": 1920, "res_y": 1080}
-            })
-        else:
-            send_overlay_command({
-                "command": {"name": "osd-overlay", "id": 1, "format": "none",
-                            "data": "", "res_x": 1920, "res_y": 1080}
-            })
+        clear_osd(OSD_NOWPLAYING)
         return
-
     name = get_filename_prefix(state.get("playing_video_path", ""))
+    fs = _overlay_font_size(_osd_screen_h())
+    data = f"{{\\an9\\pos(1920,{OVERLAY_MARGIN_TOP})\\fs{fs}\\bord2\\c&HFFFFFF&}}Now Playing: {name}"
+    send_osd(OSD_NOWPLAYING, data)
+
+
+def send_timecode_overlay():
+    """Send elapsed/total time + transpose + vocals via osd-overlay (OSD_TIMECODE, ID 3).
+    Clears when not playing."""
+    if not state["playing"]:
+        clear_osd(OSD_TIMECODE)
+        return
+    fs = _overlay_font_size(_osd_screen_h())
+    # Stack below Now Playing
+    y = OVERLAY_MARGIN_TOP + int(fs * 0.9)
+
     elapsed = _fmt_time(state["position"])
     total = _fmt_time(state["duration"])
     st = state["semitones"]
     st_str = f"+{st}st" if st > 0 else f"{st}st"
     vol_pct = int(state["vocal_volume"] * 100)
 
-    lines = [
-        f"{{\\an9\\fs{fs_title+10}\\bord2\\c&HFFFFFF&}}Now Playing: {name}",
-        f"{{\\an9\\fs{fs_title-5}\\bord1\\c&HCCCCCC&}}{elapsed} / {total}  |  Transpose: {st_str}  |  Vocals: {vol_pct}%",
-    ]
-    if show_up_next:
-        lines.append(f"{{\\an9\\fs{fs_title+5}\\bord2\\c&HFFFFFF&}}Up Next: {next_name}")
+    data = f"{{\\an9\\pos(1920,{y})\\fs{fs-15}\\bord1\\c&HCCCCCC&}}{elapsed} / {total}  |  Transpose: {st_str}  |  Vocals: {vol_pct}%"
+    send_osd(OSD_TIMECODE, data)
 
-    data = "\n".join(lines)
-    send_overlay_command({
-        "command": {"name": "osd-overlay", "id": 1, "format": "ass-events",
-                    "data": data, "res_x": 1920, "res_y": 1080}
-    })
+
+def send_upnext_overlay():
+    """Send 'Up Next: <title>' via osd-overlay (OSD_UPNEXT, ID 4).
+    Displays when next path differs from playing path; clears otherwise."""
+    next_path = state["video_path"]
+    show_up_next = next_path and next_path != state.get("playing_video_path")
+    if not show_up_next:
+        clear_osd(OSD_UPNEXT)
+        return
+    next_name = get_filename_prefix(next_path)
+    fs = _overlay_font_size(_osd_screen_h())
+    # Stack below Now Playing + Timecode lines
+    y = OVERLAY_MARGIN_TOP + int(fs * 0.9) + int((fs - 10) * 1.05)
+    data = f"{{\\an9\\pos(1920,{y})\\fs{fs-10}\\bord2\\c&HFFFFFF&}}Up Next: {next_name}"
+    send_osd(OSD_UPNEXT, data)
 
 
 def poll_position():
@@ -430,7 +457,7 @@ def poll_position():
 
         # Update elapsed time overlay every cycle
         if state["playing"]:
-            send_nowplaying_overlay()
+            send_timecode_overlay()
 
         # Detect window resize via OSD dimension change
         resp = send_mpv_query({"command": ["get_property", "osd-width"]})
@@ -443,7 +470,10 @@ def poll_position():
                 last_osd_w, last_osd_h = cur_w, cur_h
                 if state["playing"]:
                     send_qr_overlay()
+                    send_url_overlay()
                     send_nowplaying_overlay()
+                    send_timecode_overlay()
+                    send_upnext_overlay()
 
         poll_stop.wait(0.5)
 
@@ -463,7 +493,7 @@ def set_files():
     state["vocal_path"] = data.get("vocal")
     state["nonvocal_path"] = data.get("nonvocal")
     state["subtitle_path"] = data.get("subtitle")
-    send_nowplaying_overlay()
+    send_upnext_overlay()
     return jsonify({"ok": True})
 
 
@@ -507,8 +537,9 @@ def play():
         poll_thread.join(timeout=1)
     poll_thread = threading.Thread(target=poll_position, daemon=True)
     poll_thread.start()
-    send_qr_overlay()
     send_nowplaying_overlay()
+    send_timecode_overlay()
+    send_upnext_overlay()
     return jsonify({"ok": True})
 
 
@@ -557,7 +588,7 @@ def set_volume():
     if state["playing"]:
         fc = build_filter_complex(state["vocal_volume"], semitones_to_pitch(state["semitones"]))
         send_mpv_command({"command": ["set_property", "lavfi-complex", fc]})
-    send_nowplaying_overlay()
+    send_timecode_overlay()
     return jsonify({"ok": True})
 
 
@@ -568,7 +599,7 @@ def set_pitch():
     if state["playing"]:
         fc = build_filter_complex(state["vocal_volume"], semitones_to_pitch(state["semitones"]))
         send_mpv_command({"command": ["set_property", "lavfi-complex", fc]})
-    send_nowplaying_overlay()
+    send_timecode_overlay()
     return jsonify({"ok": True})
 
 
@@ -626,7 +657,6 @@ def browse():
 
 
 if __name__ == "__main__":
-    generate_placeholder()
     _debug = True
     # With debug=True the Werkzeug reloader spawns a parent watcher + child worker.
     # Only start MPV in the child (WERKZEUG_RUN_MAIN=true) to avoid two windows.
