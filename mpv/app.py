@@ -229,6 +229,8 @@ def start_mpv():
         "--image-display-duration=inf",
         f"--input-ipc-server={IPC_SOCKET}",
         "--no-terminal",
+        "--osd-margin-x=0",
+        "--osd-margin-y=0",
     ]
     mpv_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # give MPV a moment to create the socket
@@ -287,24 +289,35 @@ def ensure_qr_png():
     img.save(QR_CODE)
 
 
+def _overlay_font_size(screen_h=None):
+    """Calculate the font size used for QR URL text and Now Playing title line.
+    Based on QR overlay sizing: max(120, screen_h // 6) for QR height,
+    then font = qr_h // 4.5."""
+    if screen_h is None:
+        screen_h = 1080
+    qr_h = max(120, screen_h // 6)
+    return qr_h // 4.5
+
+
 def send_qr_overlay():
     """Send the QR code + URL text as a persistent overlay via overlay-add."""
     # Query OSD height for sizing
     resp = send_mpv_query({"command": ["get_property", "osd-height"]})
     screen_h = resp.get("data") if resp and resp.get("data") is not None else 1080
     qr_h = max(120, screen_h // 6)
+    font_size = _overlay_font_size(screen_h)
 
     # Open QR code image and resize
     qr_img = Image.open(QR_CODE).convert("RGBA").resize((qr_h, qr_h))
 
     # Render URL text beside it
     url_text = get_server_url()
-    font = ImageFont.load_default(size=qr_h // 4.5)
+    font = ImageFont.load_default(size=font_size)
     # Try DejaVuSans fallback
     for font_path in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                       "/usr/share/fonts/TTF/DejaVuSans.ttf"]:
         try:
-            font = ImageFont.truetype(font_path, qr_h // 4.5)
+            font = ImageFont.truetype(font_path, font_size)
             break
         except (OSError, IOError):
             pass
@@ -351,6 +364,11 @@ def _fmt_time(seconds):
 def send_nowplaying_overlay():
     """Send Now Playing / Up Next display via osd-overlay (ASS events, ID 1).
     Uses command-as-object format: {"command": {"name": "osd-overlay", ...}}"""
+    # Query screen height for dynamic font sizing
+    resp = send_mpv_query({"command": ["get_property", "osd-height"]})
+    screen_h = resp.get("data") if resp and resp.get("data") is not None else 1080
+    fs_title = _overlay_font_size(screen_h)
+
     next_path = state["video_path"]
     show_up_next = next_path and next_path != state.get("playing_video_path")
     next_name = get_filename_prefix(next_path) if show_up_next else ""
@@ -377,12 +395,11 @@ def send_nowplaying_overlay():
     vol_pct = int(state["vocal_volume"] * 100)
 
     lines = [
-        f"{{\\an9\\fs30\\bord2\\c&HFFFFFF&}}Now Playing: {name}",
-        f"{{\\an9\\fs22\\bord1\\c&HCCCCCC&}}{elapsed} / {total}  |  Transpose: {st_str}  |  Vocals: {vol_pct}%",
-        #f"{{\\an9\\fs22\\bord1\\c&HCCCCCC&}}Transpose: {st_str}  |  Vocals: {vol_pct}%",
+        f"{{\\an9\\fs{fs_title+10}\\bord2\\c&HFFFFFF&}}Now Playing: {name}",
+        f"{{\\an9\\fs{fs_title-5}\\bord1\\c&HCCCCCC&}}{elapsed} / {total}  |  Transpose: {st_str}  |  Vocals: {vol_pct}%",
     ]
     if show_up_next:
-        lines.append(f"{{\\an9\\fs24\\bord2\\c&HFFFFFF&}}Up Next: {next_name}")
+        lines.append(f"{{\\an9\\fs{fs_title+5}\\bord2\\c&HFFFFFF&}}Up Next: {next_name}")
 
     data = "\n".join(lines)
     send_overlay_command({
