@@ -5,6 +5,7 @@ import subprocess
 import socket
 import threading
 import time
+import logging
 from pathlib import Path
 import qrcode
 from PIL import Image, ImageFont
@@ -610,6 +611,14 @@ def set_sub_delay():
     if state["playing"]:
         send_mpv_command({"command": ["set_property", "sub-delay", float(delay)]})
     return jsonify({"ok": True})
+
+
+# ── Suppress /api/status from Werkzeug request log ────────────────────────────
+class _StatusFilter(logging.Filter):
+    def filter(self, record):
+        return '/api/status' not in record.getMessage()
+
+logging.getLogger('werkzeug').addFilter(_StatusFilter())
 
 
 @app.route("/api/status", methods=["GET"])
