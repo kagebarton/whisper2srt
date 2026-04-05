@@ -214,12 +214,11 @@ def end_song():
     send_mpv_command({"command": ["set_property", "lavfi-complex", ""]})
     load_placeholder()
     reset_state_defaults()
-    send_qr_overlay()
-    send_url_overlay()
     clear_osd(OSD_NOWPLAYING)
     clear_osd(OSD_TIMECODE)
-    send_upnext_overlay()
-    poll_stop.set()
+    # poll_position keeps running in idle state to handle resize events;
+    # it will also call send_qr_overlay/send_url_overlay/send_upnext_overlay
+    # on the next cycle via the resize-detection branch (last_osd_w/h reset on load).
 
 
 def reset_state_defaults():
@@ -250,9 +249,12 @@ def start_mpv():
     time.sleep(0.5)
     load_placeholder()
     ensure_qr_png()
-    send_qr_overlay()
-    send_url_overlay()
-    send_upnext_overlay()
+    # Start the poll thread immediately so it catches the window settling to its
+    # final size and resends overlays via the resize-detection branch.
+    global poll_thread
+    poll_stop.clear()
+    poll_thread = threading.Thread(target=poll_position, daemon=True)
+    poll_thread.start()
 
 
 def quit_mpv():
@@ -441,11 +443,14 @@ def poll_position():
     last_osd_w = None
     last_osd_h = None
     while not poll_stop.is_set():
-        # Check if MPV went idle (song ended naturally)
+        # Check if MPV went idle (song ended naturally) — only act if we were playing
         idle_resp = send_mpv_query({"command": ["get_property", "idle-active"]})
         if idle_resp and idle_resp.get("data") is True:
-            end_song()
-            break
+            if state["playing"]:
+                end_song()
+            # Always reset OSD tracking so resize detection fires after file change
+            last_osd_w = None
+            last_osd_h = None
 
         resp = send_mpv_query({"command": ["get_property", "time-pos"]})
         if resp and resp.get("data") is not None:
@@ -468,12 +473,12 @@ def poll_position():
         if cur_w is not None and cur_h is not None:
             if cur_w != last_osd_w or cur_h != last_osd_h:
                 last_osd_w, last_osd_h = cur_w, cur_h
+                send_qr_overlay()
+                send_url_overlay()
                 if state["playing"]:
-                    send_qr_overlay()
-                    send_url_overlay()
                     send_nowplaying_overlay()
                     send_timecode_overlay()
-                    send_upnext_overlay()
+                send_upnext_overlay()
 
         poll_stop.wait(0.5)
 
@@ -531,12 +536,6 @@ def play():
 
     state["playing"] = True
     state["playing_video_path"] = state["video_path"]
-    poll_stop.clear()
-    global poll_thread
-    if poll_thread is not None:
-        poll_thread.join(timeout=1)
-    poll_thread = threading.Thread(target=poll_position, daemon=True)
-    poll_thread.start()
     send_nowplaying_overlay()
     send_timecode_overlay()
     send_upnext_overlay()
