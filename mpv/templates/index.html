@@ -140,11 +140,30 @@
   }
   .slider-row input[type="range"] { flex: 1; }
   .slider-row .val {
-    width: 52px;
+    width: 72px;
     text-align: center;
     font-size: .8rem;
     color: var(--text);
+    flex-shrink: 0;
   }
+  .slider-row .step-btn {
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--text);
+    font-size: 1.1rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    line-height: 1;
+  }
+  .slider-row .step-btn:hover { background: #1a5276; }
+  .slider-row .step-btn:active { background: var(--highlight); }
 
   input[type="range"] {
     -webkit-appearance: none;
@@ -316,21 +335,27 @@
   <!-- Vocal volume -->
   <div class="slider-row">
     <label>Vocal Volume</label>
+    <button class="step-btn" onclick="stepVolume(-10)" title="Decrease volume">−</button>
     <input type="range" id="vocalVol" min="0" max="100" step="1" value="{{ (state.vocal_volume * 100) | int }}">
+    <button class="step-btn" onclick="stepVolume(10)" title="Increase volume">+</button>
     <span class="val" id="vocalVolVal">{{ '%d%%' % (state.vocal_volume * 100) }}</span>
   </div>
 
   <!-- Pitch -->
   <div class="slider-row">
     <label>Pitch</label>
+    <button class="step-btn" onclick="stepPitch(-1)" title="Decrease pitch">−</button>
     <input type="range" id="pitchSlider" min="-3" max="3" step="1" value="{{ state.semitones }}">
+    <button class="step-btn" onclick="stepPitch(1)" title="Increase pitch">+</button>
     <span class="val" id="pitchVal">{{ '%+d st' % state.semitones if state.semitones else '0 st' }}</span>
   </div>
 
   <!-- Subtitle delay -->
   <div class="slider-row">
     <label>Sub Delay</label>
+    <button class="step-btn" onclick="stepSubDelay(-100)" title="Decrease delay">−</button>
     <input type="range" id="subDelaySlider" min="-5000" max="5000" step="50" value="{{ (state.subtitle_delay * 1000) | int }}">
+    <button class="step-btn" onclick="stepSubDelay(100)" title="Increase delay">+</button>
     <span class="val" id="subDelayVal">{{ '%+.1fs' % state.subtitle_delay if state.subtitle_delay else '0.0s' }}</span>
   </div>
 </div>
@@ -362,6 +387,13 @@
   let playing = document.getElementById('playPauseBtn').textContent.includes('Pause');
   let seeking = false;
   let pollInterval = null;
+
+  // ── Debounce helper (per-key) ──────────────────────────
+  const _debounceTimers = {};
+  function debounce(fn, delay, key) {
+    clearTimeout(_debounceTimers[key]);
+    _debounceTimers[key] = setTimeout(() => { fn(); delete _debounceTimers[key]; }, delay);
+  }
 
   // Start polling if server is already playing when page loads
   if (playing) startPolling();
@@ -557,6 +589,21 @@
     });
   });
 
+  function stepVolume(delta) {
+    const min = parseInt(vocalVol.min);
+    const max = parseInt(vocalVol.max);
+    let val = Math.max(min, Math.min(max, parseInt(vocalVol.value) + delta));
+    vocalVol.value = val;
+    document.getElementById('vocalVolVal').textContent = `${val}%`;
+    debounce(() => {
+      fetch('/api/volume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ volume: parseInt(vocalVol.value) }),
+      });
+    }, 300, '_vol');
+  }
+
   // ── Pitch ──────────────────────────────────────────────
   const pitchSlider = document.getElementById('pitchSlider');
   const SEMITONE_LABELS = {
@@ -576,6 +623,21 @@
     });
   });
 
+  function stepPitch(delta) {
+    const min = parseInt(pitchSlider.min);
+    const max = parseInt(pitchSlider.max);
+    let val = Math.max(min, Math.min(max, parseInt(pitchSlider.value) + delta));
+    pitchSlider.value = val;
+    document.getElementById('pitchVal').textContent = SEMITONE_LABELS[String(val)] || `${val > 0 ? '+' : ''}${val} st`;
+    debounce(() => {
+      fetch('/api/pitch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ semitones: parseInt(pitchSlider.value) }),
+      });
+    }, 300, '_pitch');
+  }
+
   // ── Subtitle delay ─────────────────────────────────────
   const subDelaySlider = document.getElementById('subDelaySlider');
   function fmtDelay(ms) {
@@ -593,6 +655,21 @@
       body: JSON.stringify({ delay: delaySec }),
     });
   });
+
+  function stepSubDelay(deltaMs) {
+    const min = parseInt(subDelaySlider.min);
+    const max = parseInt(subDelaySlider.max);
+    let val = Math.max(min, Math.min(max, parseInt(subDelaySlider.value) + deltaMs));
+    subDelaySlider.value = val;
+    document.getElementById('subDelayVal').textContent = fmtDelay(val);
+    debounce(() => {
+      fetch('/api/sub_delay', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delay: parseInt(subDelaySlider.value) / 1000 }),
+      });
+    }, 300, '_sub');
+  }
 
   // ── Polling for position ───────────────────────────────
   let state = { position: 0, duration: 0 };
