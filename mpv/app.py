@@ -73,6 +73,7 @@ state = {
     "duration": 0.0,
     "position": 0.0,
     "playing_video_path": None,   # tracks what is currently loaded in MPV
+    "dual_stem": False,           # True when both vocal + nonvocal stems are loaded
 }
 
 mpv_proc = None
@@ -171,30 +172,42 @@ def close_overlay_sock():
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def build_filter_complex(vocal_vol, pitch):
+def build_filter(vocal_vol, pitch, dual_stem):
     """Rebuild the lavfi-complex string with per-track rubberband settings."""
-    return (
-        # Vocal stem: volume + pitch shift (formant-preserved for voice)
-        f'[aid2]volume@vocalvol={vocal_vol},'
-        f'rubberband@vocalrb=pitch={pitch}'
-        f':window=long'
-        f':pitchq=quality'
-        f':transients=crisp'
-        f':detector=compound'
-        f':formant=preserved'
-        f':channels=together'
-        f'[vocal];'
-        # Non-vocal stem: fixed volume + pitch shift (formant-shifted for instruments)
-        f'[aid3]volume@nonvocalvol={NONVOCAL_VOL},'
-        f'rubberband@nonvocalrb=pitch={pitch}'
-        f':window=standard'
-        f':pitchq=quality'
-        f':transients=crisp'
-        f':detector=compound'
-        f':formant=shifted'
-        f'[nonvocal];'
-        f'[vocal][nonvocal]amix=inputs=2:normalize=0[ao]'
-    )
+    if dual_stem:
+        # Dual-stem: vocal + non-vocal stems with amix
+        return (
+            f'[aid2]volume@vocalvol={vocal_vol},'
+            f'rubberband@vocalrb=pitch={pitch}'
+            f':window=long'
+            f':pitchq=quality'
+            f':transients=crisp'
+            f':detector=compound'
+            f':formant=preserved'
+            f':channels=together'
+            f'[vocal];'
+            f'[aid3]volume@nonvocalvol={NONVOCAL_VOL},'
+            f'rubberband@nonvocalrb=pitch={pitch}'
+            f':window=standard'
+            f':pitchq=quality'
+            f':transients=crisp'
+            f':detector=compound'
+            f':formant=shifted'
+            f'[nonvocal];'
+            f'[vocal][nonvocal]amix=inputs=2:normalize=0[ao]'
+        )
+    else:
+        # Single-stem: video's native audio with rubberband
+        return (
+            f'[aid1]rubberband@rb=pitch={pitch}'
+            f':window=long'
+            f':pitchq=quality'
+            f':transients=crisp'
+            f':detector=compound'
+            f':formant=preserved'
+            f':channels=together'
+            f'[ao]'
+        )
 
 
 def send_mpv_command(cmd_dict):
@@ -251,6 +264,7 @@ def reset_state_defaults():
     state["vocal_volume"] = 1.0
     state["semitones"] = 0
     state["subtitle_delay"] = 0.0
+    state["dual_stem"] = False
 
 
 def start_mpv():
@@ -526,8 +540,8 @@ def set_files():
 
 @app.route("/api/play", methods=["POST"])
 def play():
-    if not all([state["video_path"], state["vocal_path"], state["nonvocal_path"]]):
-        return jsonify({"ok": False, "error": "Missing file selection"}), 400
+    if not state["video_path"]:
+        return jsonify({"ok": False, "error": "Missing video path"}), 400
     if state["playing"]:
         return jsonify({"ok": True})  # already playing
 
@@ -543,18 +557,23 @@ def play():
             break
         time.sleep(0.2)
 
-    # Add audio tracks
-    send_mpv_command({"command": ["audio-add", state["vocal_path"]]})
-    send_mpv_command({"command": ["audio-add", state["nonvocal_path"]]})
-    time.sleep(0.2)
+    # Determine stem availability
+    dual = bool(state["vocal_path"] and state["nonvocal_path"]
+                and os.path.exists(state["vocal_path"])
+                and os.path.exists(state["nonvocal_path"]))
+    state["dual_stem"] = dual
 
-    # Set filter complex with default vol=1.0 and pitch=1.0
-    fc = build_filter_complex(1.0, semitones_to_pitch(0))
+    if dual:
+        send_mpv_command({"command": ["audio-add", state["vocal_path"]]})
+        send_mpv_command({"command": ["audio-add", state["nonvocal_path"]]})
+        time.sleep(0.2)
+
+    fc = build_filter(1.0, semitones_to_pitch(0), dual)
     send_mpv_command({"command": ["set_property", "lavfi-complex", fc]})
 
     # Add subtitles if available
     if state["subtitle_path"]:
-        send_mpv_command({"command": ["sub-add", state["subtitle_path"]]})
+        send_mpv_command({"command": ["sub-add", state["subtitle_path"], "select"]})
 
     state["playing"] = True
     state["playing_video_path"] = state["video_path"]
@@ -607,7 +626,7 @@ def set_volume():
     vol_pct = request.json.get("volume", 100)
     state["vocal_volume"] = float(vol_pct) / 100.0
     if state["playing"]:
-        fc = build_filter_complex(state["vocal_volume"], semitones_to_pitch(state["semitones"]))
+        fc = build_filter(state["vocal_volume"], semitones_to_pitch(state["semitones"]), state["dual_stem"])
         send_mpv_command({"command": ["set_property", "lavfi-complex", fc]})
     send_timecode_overlay()
     return jsonify({"ok": True})
@@ -618,7 +637,7 @@ def set_pitch():
     st = request.json.get("semitones", 0)
     state["semitones"] = int(st)
     if state["playing"]:
-        fc = build_filter_complex(state["vocal_volume"], semitones_to_pitch(state["semitones"]))
+        fc = build_filter(state["vocal_volume"], semitones_to_pitch(state["semitones"]), state["dual_stem"])
         send_mpv_command({"command": ["set_property", "lavfi-complex", fc]})
     send_timecode_overlay()
     return jsonify({"ok": True})
@@ -631,6 +650,18 @@ def set_sub_delay():
     state["subtitle_delay"] = float(delay)
     if state["playing"]:
         send_mpv_command({"command": ["set_property", "sub-delay", float(delay)]})
+    return jsonify({"ok": True})
+
+
+@app.route("/api/sub_mode", methods=["POST"])
+def set_sub_mode():
+    """Switch the active subtitle file during playback."""
+    path = request.json.get("subtitle_path")
+    state["subtitle_path"] = path
+    if state["playing"]:
+        send_mpv_command({"command": ["sub-remove"]})
+        if path:
+            send_mpv_command({"command": ["sub-add", path, "select"]})
     return jsonify({"ok": True})
 
 
@@ -671,6 +702,7 @@ def status():
         "vocal_volume": state["vocal_volume"],
         "semitones": state["semitones"],
         "subtitle_delay": state["subtitle_delay"],
+        "dual_stem": state["dual_stem"],
         "master_volume": get_master_volume_pct(),
     })
 

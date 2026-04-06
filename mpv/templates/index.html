@@ -191,6 +191,43 @@
   .slider-row .step-btn:hover { background: #1a5276; }
   .slider-row .step-btn:active { background: var(--highlight); }
 
+  /* ── Segmented control ────────────────────────────────── */
+  .seg-row {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    margin-bottom: .75rem;
+  }
+  .seg-row label {
+    width: 110px;
+    text-align: right;
+    font-size: .85rem;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .seg-ctrl {
+    display: flex;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--accent);
+    flex: 1;
+  }
+  .seg-btn {
+    flex: 1;
+    padding: .45rem .6rem;
+    border: none;
+    border-right: 1px solid var(--accent);
+    background: var(--bg);
+    color: var(--text-dim);
+    font-size: .8rem;
+    cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .seg-btn:last-child { border-right: none; }
+  .seg-btn:hover { background: var(--accent); color: var(--text); }
+  .seg-btn.active { background: var(--highlight); color: var(--text); }
+  .seg-btn:disabled { opacity: .35; cursor: default; pointer-events: none; }
+
   input[type="range"] {
     -webkit-appearance: none;
     appearance: none;
@@ -372,7 +409,7 @@
   </div>
 
   <!-- Vocal volume -->
-  <div class="slider-row">
+  <div class="slider-row" id="vocalVolRow">
     <label>Vocal Volume</label>
     <button class="step-btn" onclick="stepVolume(-10)" title="Decrease volume">−</button>
     <input type="range" id="vocalVol" min="0" max="100" step="1" value="{{ (state.vocal_volume * 100) | int }}">
@@ -389,8 +426,18 @@
     <span class="val" id="pitchVal">{{ '%+d st' % state.semitones if state.semitones else '0 st' }}</span>
   </div>
 
+  <!-- Subtitle mode selector -->
+  <div class="seg-row" id="subModeRow">
+    <label>Subtitles</label>
+    <div class="seg-ctrl">
+      <button id="subBtnKaraoke" class="seg-btn" onclick="setSubMode('karaoke')">Karaoke</button>
+      <button id="subBtnSrt"     class="seg-btn" onclick="setSubMode('srt')">Subtitles</button>
+      <button id="subBtnOff"     class="seg-btn active" onclick="setSubMode('off')">Off</button>
+    </div>
+  </div>
+
   <!-- Subtitle delay -->
-  <div class="slider-row">
+  <div class="slider-row" id="subDelayRow"{{ ' style="display:none"' if not (state.subtitle_path and state.subtitle_path.endswith('.srt')) else '' }}>
     <label>Sub Delay</label>
     <button class="step-btn" onclick="stepSubDelay(-100)" title="Decrease delay">−</button>
     <input type="range" id="subDelaySlider" min="-5000" max="5000" step="50" value="{{ (state.subtitle_delay * 1000) | int }}">
@@ -452,6 +499,10 @@
 
   // Initialize companion files from pre-populated video path
   if (files.video) updateCompanionFiles(files.video);
+  else {
+    // No video path pre-populated — hide vocal volume row
+    document.getElementById('vocalVolRow').style.display = 'none';
+  }
 
   function sendFiles() {
     fetch('/api/files', {
@@ -470,6 +521,22 @@
     files.vocal = files.nonvocal = files.subtitle = null;
   }
 
+  // Cached subtitle data for mode switching without re-fetching
+  let _assData = null;
+  let _srtData = null;
+  let _srtDelay = 0;  // cached SRT subtitle delay (ms), reset when leaving SRT mode
+
+  // Helper: set subtitle delay on slider, label, and backend
+  function _applySubDelay(ms) {
+    subDelaySlider.value = ms;
+    document.getElementById('subDelayVal').textContent = fmtDelay(ms);
+    fetch('/api/sub_delay', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delay: ms / 1000 }),
+    });
+  }
+
   function updateCompanionFiles(videoPath) {
     fetch(`/api/derive_files?video=${encodeURIComponent(videoPath)}`)
       .then(r => r.json())
@@ -486,21 +553,71 @@
         document.getElementById('lblNonvocal').textContent = nonvocal.exists ? basename(nonvocal.path) : '—';
         files.nonvocal = nonvocal.exists ? nonvocal.path : null;
 
-        // ASS (used as subtitle path for playback)
-        const ass = data.ass;
-        document.getElementById('chkAss').checked = ass.exists;
-        document.getElementById('lblAss').textContent = ass.exists ? basename(ass.path) : '—';
+        // Show/hide vocal volume row based on dual-stem
+        const dualStem = vocal.exists && nonvocal.exists;
+        document.getElementById('vocalVolRow').style.display = dualStem ? '' : 'none';
 
-        // SRT (shown but not wired to playback yet)
-        const srt = data.srt;
-        document.getElementById('chkSrt').checked = srt.exists;
-        document.getElementById('lblSrt').textContent = srt.exists ? basename(srt.path) : '—';
+        // Cache subtitle data
+        _assData = data.ass;
+        document.getElementById('chkAss').checked = _assData.exists;
+        document.getElementById('lblAss').textContent = _assData.exists ? basename(_assData.path) : '—';
 
-        // Prefer ASS over SRT for subtitle path
-        files.subtitle = ass.exists ? ass.path : (srt.exists ? srt.path : null);
+        _srtData = data.srt;
+        document.getElementById('chkSrt').checked = _srtData.exists;
+        document.getElementById('lblSrt').textContent = _srtData.exists ? basename(_srtData.path) : '—';
+
+        // Update subtitle mode selector
+        updateSubControl(_assData, _srtData);
 
         sendFiles();
       });
+  }
+
+  function updateSubControl(assData, srtData) {
+    document.getElementById('subBtnKaraoke').disabled = !assData.exists;
+    document.getElementById('subBtnSrt').disabled     = !srtData.exists;
+
+    // Determine default: karaoke > srt > off
+    let defaultMode = 'off';
+    if (assData.exists) defaultMode = 'karaoke';
+    else if (srtData.exists) defaultMode = 'srt';
+    setSubMode(defaultMode, assData, srtData);
+  }
+
+  function setSubMode(mode, assData, srtData) {
+    // assData/srtData can be cached from last derive_files call
+    if (assData) _assData = assData;
+    if (srtData) _srtData = srtData;
+
+    ['karaoke','srt','off'].forEach(m => {
+      const key = m.charAt(0).toUpperCase() + m.slice(1);
+      document.getElementById('subBtn' + key)
+        .classList.toggle('active', m === mode);
+    });
+
+    files.subtitle = mode === 'karaoke' ? _assData?.path
+                   : mode === 'srt'     ? _srtData?.path
+                   : null;
+
+    // Show/hide sub delay
+    document.getElementById('subDelayRow').style.display = mode === 'srt' ? '' : 'none';
+
+    // Delay only applies to SRT mode; cache/restore so it never bleeds into ASS
+    if (mode === 'srt') {
+      _applySubDelay(_srtDelay);
+    } else {
+      _srtDelay = parseInt(subDelaySlider.value);
+      _applySubDelay(0);
+    }
+
+    // Live-switch subtitle in MPV if playing
+    fetch('/api/sub_mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subtitle_path: files.subtitle }),
+    });
+
+    sendFiles();
   }
 
   function basename(path) {
@@ -636,6 +753,7 @@
     document.getElementById('pitchVal').textContent = '0 st';
     subDelaySlider.value = 0;
     document.getElementById('subDelayVal').textContent = '+0.0s';
+    _srtDelay = 0;
     stopPolling();
   }
 
@@ -734,11 +852,12 @@
     document.getElementById('subDelayVal').textContent = fmtDelay(parseInt(subDelaySlider.value));
   });
   subDelaySlider.addEventListener('change', () => {
-    const delaySec = parseInt(subDelaySlider.value) / 1000;
+    const ms = parseInt(subDelaySlider.value);
+    _srtDelay = ms;
     fetch('/api/sub_delay', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ delay: delaySec }),
+      body: JSON.stringify({ delay: ms / 1000 }),
     });
   });
 
@@ -748,6 +867,7 @@
     let val = Math.max(min, Math.min(max, parseInt(subDelaySlider.value) + deltaMs));
     subDelaySlider.value = val;
     document.getElementById('subDelayVal').textContent = fmtDelay(val);
+    _srtDelay = val;
     debounce(() => {
       fetch('/api/sub_delay', {
         method: 'POST',
