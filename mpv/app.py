@@ -43,9 +43,18 @@ LOGO_JPG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.jpg")
 
 SONG_DIR = "/home/ken/whisper2srt/song"
 DEFAULT_VIDEO    = os.path.join(SONG_DIR, "selfish.mp4")
-DEFAULT_VOCAL    = os.path.join(SONG_DIR, "selfish---vocal.m4a")
-DEFAULT_NONVOCAL = os.path.join(SONG_DIR, "selfish---nonvocal.m4a")
-DEFAULT_SUBTITLE = os.path.join(SONG_DIR, "selfish---vocal.ass")
+
+def derive_companion_paths(video_path):
+    """Given a video path, return derived companion file paths."""
+    p = Path(video_path)
+    stem = p.stem.split("---")[0]   # e.g. "selfish" from "selfish.mp4"
+    base = p.parent / stem
+    return {
+        "vocal":    str(base) + "---vocal.m4a",
+        "nonvocal": str(base) + "---nonvocal.m4a",
+        "ass":      str(base) + ".ass",
+        "srt":      str(base) + ".srt",
+    }
 
 def semitones_to_pitch(st):
     """Convert semitone offset to MPV rubberband pitch multiplier."""
@@ -53,9 +62,9 @@ def semitones_to_pitch(st):
 
 state = {
     "video_path": DEFAULT_VIDEO,
-    "vocal_path": DEFAULT_VOCAL,
-    "nonvocal_path": DEFAULT_NONVOCAL,
-    "subtitle_path": DEFAULT_SUBTITLE,
+    "vocal_path": None,
+    "nonvocal_path": None,
+    "subtitle_path": None,
     "subtitle_delay": 0.0,       # seconds, positive = delay, negative = advance
     "vocal_volume": 1.0,
     "semitones": 0,            # -3 to +3, mapped to pitch via 2^(st/12)
@@ -672,6 +681,18 @@ def browse():
         "current": dir_path,
         "parent": parent,
         "entries": entries,
+    })
+
+
+@app.route("/api/derive_files", methods=["GET"])
+def derive_files():
+    video = request.args.get("video", "")
+    if not video:
+        return jsonify({"error": "no video path"}), 400
+    paths = derive_companion_paths(video)
+    return jsonify({
+        k: {"path": v, "exists": os.path.exists(v)}
+        for k, v in paths.items()
     })
 
 
