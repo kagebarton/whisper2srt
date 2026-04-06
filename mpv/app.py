@@ -17,6 +17,17 @@ app = Flask(__name__)
 SHOW_QR = True   # Show QR code + URL overlay pair (top-left)
 OVERLAY_MARGIN_TOP = 0   # px from top edge in ASS 1920x1080 space
 
+# Common ASS style tags applied to every overlay text (inside the {…} block).
+# Examples: \bord2\shad1\fnDejaVu Sans\b1
+# Leave empty ("") for no extra styling.
+OVERLAY_STYLE = "\\bord3\\shad2\\3c&H000000&\\4c&H000000&\\4a&H80&"
+
+# Overlay text colors (ASS hex BB GG RR format)
+URL_COLOR        = "&HFFFFFF&"   # URL text (top-left)
+NOWPLAYING_COLOR = "&H507FFF&"   # "Now Playing: <title>"
+TIMECODE_COLOR   = "&HAAD5FF&"   # "1:23 / 3:45 | Transpose: +2 | Vocals: 80%"
+UPNEXT_COLOR     = "&HB48246&"   # "Up Next: <title>"
+
 # ── OSD ID constants ───────────────────────────────────────────────────────────
 OSD_URL        = 1   # URL text, paired with QR bitmap, top-left
 OSD_NOWPLAYING = 2   # "Now Playing: <title>" line, top-right
@@ -374,7 +385,7 @@ def send_url_overlay():
     x = (qr_h + 10) * 1920 / screen_w
     y = OVERLAY_MARGIN_TOP
     # \an7 = top-left anchor (same top-edge semantics as \an9 for Now Playing)
-    data = f"{{\\an7\\pos({x},{y})\\fs{font_size}\\bord2\\c&HFFFFFF&}}{url_text}"
+    data = f"{{\\an7\\pos({x},{y})\\fs{font_size}{OVERLAY_STYLE}\\c{URL_COLOR}}}{url_text}"
     send_osd(OSD_URL, data)
 
 
@@ -398,7 +409,7 @@ def send_nowplaying_overlay():
         return
     name = get_filename_prefix(state.get("playing_video_path", ""))
     fs = _overlay_font_size(_osd_screen_h())
-    data = f"{{\\an9\\pos(1920,{OVERLAY_MARGIN_TOP})\\fs{fs}\\bord2\\c&HFFFFFF&}}Now Playing: {name}"
+    data = f"{{\\an9\\pos(1920,{OVERLAY_MARGIN_TOP})\\fs{fs}{OVERLAY_STYLE}\\c{NOWPLAYING_COLOR}}}Now Playing: {name}"
     send_osd(OSD_NOWPLAYING, data)
 
 
@@ -418,7 +429,7 @@ def send_timecode_overlay():
     st_str = f"+{st}st" if st > 0 else f"{st}st"
     vol_pct = int(state["vocal_volume"] * 100)
 
-    data = f"{{\\an9\\pos(1920,{y})\\fs{fs-15}\\bord1\\c&HCCCCCC&}}{elapsed} / {total}  |  Transpose: {st_str}  |  Vocals: {vol_pct}%"
+    data = f"{{\\an9\\pos(1920,{y})\\fs{fs-15}{OVERLAY_STYLE}\\c{TIMECODE_COLOR}}}{elapsed} / {total} | Transpose: {st_str} | Vocals: {vol_pct}%"
     send_osd(OSD_TIMECODE, data)
 
 
@@ -434,7 +445,7 @@ def send_upnext_overlay():
     fs = _overlay_font_size(_osd_screen_h())
     # Stack below Now Playing + Timecode lines
     y = OVERLAY_MARGIN_TOP + int(fs * 0.9) + int((fs - 10) * 1.05)
-    data = f"{{\\an9\\pos(1920,{y})\\fs{fs-10}\\bord2\\c&HFFFFFF&}}Up Next: {next_name}"
+    data = f"{{\\an9\\pos(1920,{y})\\fs{fs-10}{OVERLAY_STYLE}\\c{UPNEXT_COLOR}}}Up Next: {next_name}"
     send_osd(OSD_UPNEXT, data)
 
 
