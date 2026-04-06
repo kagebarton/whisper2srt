@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>MPV Mixer</title>
 <style>
   :root {
@@ -147,8 +147,8 @@
     flex-shrink: 0;
   }
   .slider-row .step-btn {
-    width: 28px;
-    height: 28px;
+    width: 36px;
+    height: 36px;
     border: none;
     border-radius: 6px;
     background: var(--accent);
@@ -176,17 +176,22 @@
   input[type="range"]::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 16px; height: 16px;
+    width: 28px; height: 28px;
+    margin-top: -11px;
     border-radius: 50%;
     background: var(--highlight);
     cursor: pointer;
   }
   input[type="range"]::-moz-range-thumb {
-    width: 16px; height: 16px;
+    width: 28px; height: 28px;
     border-radius: 50%;
     background: var(--highlight);
     cursor: pointer;
     border: none;
+  }
+  button,
+  input[type="range"] {
+    touch-action: manipulation;
   }
 
   /* ── File browser modal ───────────────────────────────── */
@@ -706,6 +711,14 @@
     const sec = Math.floor(s % 60);
     return `${m}:${sec.toString().padStart(2, '0')}`;
   }
+
+  // Prevent touch scroll/zoom cancelling step button taps
+  document.querySelectorAll('.step-btn').forEach(btn => {
+    btn.addEventListener('touchend', e => {
+      e.preventDefault();
+      btn.click();
+    }, { passive: false });
+  });
 </script>
 </body>
 </html>
