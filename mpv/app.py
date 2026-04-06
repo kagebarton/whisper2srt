@@ -429,7 +429,7 @@ def send_timecode_overlay():
     st_str = f"+{st}st" if st > 0 else f"{st}st"
     vol_pct = int(state["vocal_volume"] * 100)
 
-    data = f"{{\\an9\\pos(1920,{y})\\fs{fs-15}{OVERLAY_STYLE}\\c{TIMECODE_COLOR}}}{elapsed} / {total} | Transpose: {st_str} | Vocals: {vol_pct}%"
+    data = f"{{\\an9\\pos(1920,{y})\\fs{fs-15}{OVERLAY_STYLE}\\c{TIMECODE_COLOR}}}{elapsed} / {total} | Pitch: {st_str} | Vocals: {vol_pct}%"
     send_osd(OSD_TIMECODE, data)
 
 
