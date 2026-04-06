@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import signal
 import subprocess
@@ -641,6 +642,26 @@ class _StatusFilter(logging.Filter):
 logging.getLogger('werkzeug').addFilter(_StatusFilter())
 
 
+def get_master_volume_pct():
+    """Query the system default sink volume as a 0–100 integer."""
+    try:
+        r = subprocess.run(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
+                           capture_output=True, text=True, timeout=1)
+        m = re.search(r'(\d+(?:\.\d+)?)', r.stdout)
+        return round(float(m.group(1)) * 100) if m else 100
+    except Exception:
+        return 100
+
+
+@app.route("/api/master_volume", methods=["POST"])
+def set_master_volume():
+    pct = int(request.json.get("volume", 100))
+    pct = max(0, min(100, pct))
+    subprocess.run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{pct / 100:.2f}"],
+                   check=False, timeout=2)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/status", methods=["GET"])
 def status():
     return jsonify({
@@ -650,6 +671,7 @@ def status():
         "vocal_volume": state["vocal_volume"],
         "semitones": state["semitones"],
         "subtitle_delay": state["subtitle_delay"],
+        "master_volume": get_master_volume_pct(),
     })
 
 

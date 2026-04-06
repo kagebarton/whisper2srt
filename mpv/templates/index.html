@@ -362,6 +362,15 @@
     <span class="time-label" id="timeTotal">{{ '%d:%02d' % (state.duration // 60, state.duration % 60) if state.duration else '0:00' }}</span>
   </div>
 
+  <!-- Master volume -->
+  <div class="slider-row">
+    <label>Master Volume</label>
+    <button class="step-btn" onclick="stepMasterVolume(-5)" title="Decrease volume">−</button>
+    <input type="range" id="masterVol" min="0" max="100" step="1" value="100">
+    <button class="step-btn" onclick="stepMasterVolume(5)" title="Increase volume">+</button>
+    <span class="val" id="masterVolVal">100%</span>
+  </div>
+
   <!-- Vocal volume -->
   <div class="slider-row">
     <label>Vocal Volume</label>
@@ -748,8 +757,49 @@
     }, 300, '_sub');
   }
 
+  // ── Master volume ──────────────────────────────────────
+  const masterVol = document.getElementById('masterVol');
+  let adjustingMasterVol = false;
+  masterVol.addEventListener('input', () => {
+    adjustingMasterVol = true;
+    document.getElementById('masterVolVal').textContent = `${masterVol.value}%`;
+  });
+  masterVol.addEventListener('change', () => {
+    fetch('/api/master_volume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ volume: parseInt(masterVol.value) }),
+    }).finally(() => { adjustingMasterVol = false; });
+  });
+
+  function stepMasterVolume(delta) {
+    const min = parseInt(masterVol.min);
+    const max = parseInt(masterVol.max);
+    let val = Math.max(min, Math.min(max, parseInt(masterVol.value) + delta));
+    masterVol.value = val;
+    document.getElementById('masterVolVal').textContent = `${val}%`;
+    adjustingMasterVol = true;
+    debounce(() => {
+      fetch('/api/master_volume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ volume: parseInt(masterVol.value) }),
+      }).finally(() => { adjustingMasterVol = false; });
+    }, 300, '_mvol');
+  }
+
   // ── Polling for position ───────────────────────────────
   let state = { position: 0, duration: 0 };
+
+  function syncMasterVol(pct) {
+    if (!adjustingMasterVol) {
+      masterVol.value = pct;
+      document.getElementById('masterVolVal').textContent = `${pct}%`;
+    }
+  }
+
+  // Initialize master volume on page load
+  fetch('/api/status').then(r => r.json()).then(d => syncMasterVol(d.master_volume ?? 100));
 
   function startPolling() {
     if (pollInterval) return;
@@ -768,6 +818,7 @@
           }
           document.getElementById('timeElapsed').textContent = fmtTime(state.position);
           document.getElementById('timeTotal').textContent = fmtTime(state.duration);
+          syncMasterVol(d.master_volume ?? 100);
         });
     }, 500);
   }
