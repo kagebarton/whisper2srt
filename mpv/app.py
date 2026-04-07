@@ -29,6 +29,23 @@ NOWPLAYING_COLOR = "&H507FFF&"   # "Now Playing: <title>"
 TIMECODE_COLOR   = "&HAAD5FF&"   # "1:23 / 3:45 | Transpose: +2 | Vocals: 80%"
 UPNEXT_COLOR     = "&HB48246&"   # "Up Next: <title>"
 
+# ── SRT subtitle style ─────────────────────────────────────────────────────────
+# Applied to SRT subtitle tracks. sub-ass-override=no ensures ASS/karaoke tracks
+# use their own embedded styles and are unaffected by these properties.
+# Colors: #RRGGBB or #AARRGGBB (AA: 00=transparent, FF=opaque)
+SRT_STYLE = {
+    "sub-ass-override":  "no",
+    "sub-font":          "Arial",
+    "sub-font-size":     40,            # ~= ASS Fontsize 60 at 1080p (sub-font-size is px at ~480p, scaled up)
+    "sub-color":         "#FFD700",    # primary text color (ASS: &H00D7FF& → RGB #FFD700)
+    "sub-border-color":  "#000000",    # outline color
+    "sub-border-size":   3,
+    "sub-shadow-offset": 2,
+    "sub-shadow-color":  "#80000000",    # shadow color: 50% transparent black (MPV format: #AARRGGBB)
+    "sub-bold":          "no",
+    "sub-margin-y":      100,
+}
+
 # ── OSD ID constants ───────────────────────────────────────────────────────────
 OSD_URL        = 1   # URL text, paired with QR bitmap, top-left
 OSD_NOWPLAYING = 2   # "Now Playing: <title>" line, top-right
@@ -246,6 +263,12 @@ def send_mpv_query(cmd_dict):
         return None
 
 
+def apply_srt_style():
+    """Push SRT_STYLE sub-* properties to the running MPV instance."""
+    for prop, val in SRT_STYLE.items():
+        send_mpv_command({"command": ["set_property", prop, val]})
+
+
 def load_placeholder():
     """Load the placeholder PNG into the running MPV instance."""
     send_mpv_command({"command": ["loadfile", PLACEHOLDER_PNG]})
@@ -291,6 +314,7 @@ def start_mpv():
     # give MPV a moment to create the socket
     time.sleep(0.5)
     load_placeholder()
+    apply_srt_style()
     ensure_qr_png()
     # Start the poll thread immediately so it catches the window settling to its
     # final size and resends overlays via the resize-detection branch.
@@ -669,6 +693,8 @@ def set_sub_mode():
         send_mpv_command({"command": ["sub-remove"]})
         if path:
             send_mpv_command({"command": ["sub-add", path, "select"]})
+            if path.endswith(".srt"):
+                apply_srt_style()
     return jsonify({"ok": True})
 
 
