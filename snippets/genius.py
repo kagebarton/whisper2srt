@@ -2,9 +2,63 @@
 """Test script for lyricsgenius search functionality."""
 
 import sys
+import os
 import re
-import config
 import lyricsgenius
+
+# ==============================================================================
+#  CYRILLIC HOMOGLYPH CORRECTION
+# ==============================================================================
+# Maps Cyrillic characters that look like Latin letters to their Latin equivalents.
+# This fixes the common Genius API issue where lyrics contain Cyrillic lookalikes.
+CYRILLIC_TO_LATIN = str.maketrans({
+    'а': 'a',   # U+0430 → U+0061
+    'А': 'A',   # U+0410 → U+0041
+    'е': 'e',   # U+0435 → U+0065
+    'Е': 'E',   # U+0415 → U+0045
+    'о': 'o',   # U+043E → U+006F
+    'О': 'O',   # U+041E → U+004F
+    'р': 'p',   # U+0440 → U+0070  (lowercase Cyrillic эр looks like Latin p)
+    'Р': 'P',   # U+0420 → U+0050
+    'с': 'c',   # U+0441 → U+0063
+    'С': 'C',   # U+0421 → U+0043
+    'х': 'x',   # U+0445 → U+0078
+    'Х': 'X',   # U+0425 → U+0058
+    'у': 'y',   # U+0443 → U+0079  (sometimes used as y lookalike)
+    'У': 'Y',   # U+0423 → U+0059
+    'К': 'K',   # U+041A → U+004B
+    'М': 'M',   # U+041C → U+004D
+    'Н': 'H',   # U+041D → U+0048
+    'Т': 'T',   # U+0422 → U+0054
+    'В': 'B',   # U+0412 → U+0042
+    'З': '3',   # U+0417 → digit (occasionally used as leetspeak)
+})
+
+
+def fix_cyrillic_homoglyphs(text: str) -> str:
+    """Replace Cyrillic characters that look like Latin letters with actual Latin ones."""
+    return text.translate(CYRILLIC_TO_LATIN)
+
+
+def clean_bracket_content(text: str) -> str:
+    """
+    Remove anything enclosed in square brackets (including the brackets themselves).
+    Handles multi-line bracket blocks and inline brackets like [Chorus].
+    Also cleans up any resulting blank lines.
+    """
+    # Remove [...] blocks (non-greedy, across lines via DOTALL)
+    text = re.sub(r'\[.*?\]', '', text, flags=re.DOTALL)
+    # Collapse multiple blank lines into single newlines, strip trailing whitespace
+    text = re.sub(r'\n\s*\n', '\n', text).strip()
+    return text
+
+# ==============================================================================
+#  CONFIG
+# ==============================================================================
+
+# Genius API token for lyricsgenius
+# Get your token at: https://genius.com/api_clients
+GENIUS_API_TOKEN = "OQNe-SALiHKew5tn4fwBEl5mcyiIBTiYS62tjWxhtiFQ2z7nvQcQJdEW05CZcdjB"
 
 
 def search_songs(genius, query: str, limit: int = 10):
@@ -44,21 +98,21 @@ def download_lyrics(genius, song) -> str:
     if not result or not result.lyrics:
         return ""
 
-    return result.lyrics
+    return clean_bracket_content(fix_cyrillic_homoglyphs(result.lyrics))
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python test_genius.py <search_term>")
+        print("Usage: python genius.py <search_term>")
         sys.exit(1)
 
     query = " ".join(sys.argv[1:])
 
-    if not config.GENIUS_API_TOKEN:
-        print("Error: GENIUS_API_TOKEN not set in config.py")
+    if not GENIUS_API_TOKEN:
+        print("Error: GENIUS_API_TOKEN not set")
         sys.exit(1)
 
-    genius = lyricsgenius.Genius(config.GENIUS_API_TOKEN, timeout=10)
+    genius = lyricsgenius.Genius(GENIUS_API_TOKEN, timeout=10)
 
     # Configure options
     #genius.verbose = False
