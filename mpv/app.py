@@ -7,6 +7,7 @@ import socket
 import threading
 import time
 import logging
+from datetime import datetime
 from pathlib import Path
 import qrcode
 from PIL import Image, ImageFont
@@ -16,7 +17,9 @@ app = Flask(__name__)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 SHOW_QR = True   # Show QR code + URL overlay pair (top-left)
+SHOW_CLOCK = True  # Show clock overlay (bottom-left)
 OVERLAY_MARGIN_TOP = 0   # px from top edge in ASS 1920x1080 space
+OVERLAY_MARGIN_BOTTOM = 0   # px from bottom edge in ASS 1920x1080 space
 
 # Common ASS style tags applied to every overlay text (inside the {…} block).
 # Examples: \bord2\shad1\fnDejaVu Sans\b1
@@ -28,6 +31,7 @@ URL_COLOR        = "&HFFFFFF&"   # URL text (top-left)
 NOWPLAYING_COLOR = "&H507FFF&"   # "Now Playing: <title>"
 TIMECODE_COLOR   = "&HAAD5FF&"   # "1:23 / 3:45 | Transpose: +2 | Vocals: 80%"
 UPNEXT_COLOR     = "&HB48246&"   # "Up Next: <title>"
+CLOCK_COLOR      = "&HFFFFFF&"   # Clock (bottom-left)
 
 # ── SRT subtitle style ─────────────────────────────────────────────────────────
 # Applied to SRT subtitle tracks. sub-ass-override=no ensures ASS/karaoke tracks
@@ -51,6 +55,7 @@ OSD_URL        = 1   # URL text, paired with QR bitmap, top-left
 OSD_NOWPLAYING = 2   # "Now Playing: <title>" line, top-right
 OSD_TIMECODE   = 3   # "1:23 / 3:45 | Transpose: +2 | Vocals: 80%" line, top-right
 OSD_UPNEXT     = 4   # "Up Next: <title>", top-right
+OSD_CLOCK      = 5   # Clock, bottom-left
 
 # ── State ──────────────────────────────────────────────────────────────────────
 IPC_SOCKET = "/tmp/mpv-socket"
@@ -504,6 +509,22 @@ def send_upnext_overlay():
     send_osd(OSD_UPNEXT, data)
 
 
+def send_clock_overlay():
+    """Send current time as an OSD overlay (OSD_CLOCK, ID 5), bottom-left corner.
+    Always shows when SHOW_CLOCK is enabled."""
+    if not SHOW_CLOCK:
+        clear_osd(OSD_CLOCK)
+        return
+    fs = _overlay_font_size(_osd_screen_h())
+    # Bottom-left: \an1 anchor (bottom-left), positioned above bottom margin
+    y = 1080 - OVERLAY_MARGIN_BOTTOM
+    now = datetime.now()
+    # 12-hour format without leading zero on hour, with AM/PM
+    clock_text = now.strftime("%I:%M %p").lstrip("0")
+    data = f"{{\\an1\\pos(0,{y})\\fs{fs}{OVERLAY_STYLE}\\c{CLOCK_COLOR}}}{clock_text}"
+    send_osd(OSD_CLOCK, data)
+
+
 def poll_position():
     """Periodically query MPV for time-pos and duration. Checks idle-active for song-end detection.
     Also monitors osd-width/osd-height changes and re-positions overlays on resize."""
@@ -530,6 +551,9 @@ def poll_position():
         # Update elapsed time overlay every cycle
         if state["playing"]:
             send_timecode_overlay()
+
+        # Update clock every cycle
+        send_clock_overlay()
 
         # Detect window resize via OSD dimension change
         resp = send_mpv_query({"command": ["get_property", "osd-width"]})
