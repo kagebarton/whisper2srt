@@ -67,6 +67,12 @@ LOGO_JPG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.jpg")
 SONG_DIR = "/home/ken/whisper2srt/song"
 DEFAULT_VIDEO    = os.path.join(SONG_DIR, "selfish.mp4")
 
+# ── Per-song defaults (applied on every song load, reset after playback) ──────
+# DEFAULT_SRT_SUB_DELAY: subtitle delay in seconds, applied only when subtitle_path ends with .srt
+DEFAULT_SRT_SUB_DELAY = -0.8
+# DEFAULT_VOCAL_VOLUME: 0.0–1.0 vocal stem volume, applied only when dual-stem is available
+DEFAULT_VOCAL_VOLUME  = 0.4
+
 def derive_companion_paths(video_path):
     """Given a video path, return derived companion file paths."""
     p = Path(video_path)
@@ -88,8 +94,8 @@ state = {
     "vocal_path": None,
     "nonvocal_path": None,
     "subtitle_path": None,
-    "subtitle_delay": 0.0,       # seconds, positive = delay, negative = advance
-    "vocal_volume": 1.0,
+    "subtitle_delay": DEFAULT_SRT_SUB_DELAY,
+    "vocal_volume": DEFAULT_VOCAL_VOLUME,
     "semitones": 0,            # -3 to +3, mapped to pitch via 2^(st/12)
     "playing": False,
     "duration": 0.0,
@@ -296,9 +302,9 @@ def reset_state_defaults():
     state["playing"] = False
     state["position"] = 0.0
     state["duration"] = 0.0
-    state["vocal_volume"] = 1.0
+    state["vocal_volume"] = DEFAULT_VOCAL_VOLUME
     state["semitones"] = 0
-    state["subtitle_delay"] = 0.0
+    state["subtitle_delay"] = DEFAULT_SRT_SUB_DELAY
     state["dual_stem"] = False
 
 
@@ -578,7 +584,9 @@ def poll_position():
 
 @app.route("/")
 def index():
-    return render_template("index.html", state=state)
+    return render_template("index.html", state=state,
+                           default_vocal_vol_pct=int(DEFAULT_VOCAL_VOLUME * 100),
+                           default_sub_delay_ms=int(DEFAULT_SRT_SUB_DELAY * 1000))
 
 
 @app.route("/api/files", methods=["POST"])
@@ -623,12 +631,15 @@ def play():
         send_mpv_command({"command": ["audio-add", state["nonvocal_path"]]})
         time.sleep(0.2)
 
-    fc = build_filter(1.0, semitones_to_pitch(0), dual)
+    fc = build_filter(state["vocal_volume"], semitones_to_pitch(0), dual)
     send_mpv_command({"command": ["set_property", "lavfi-complex", fc]})
 
     # Add subtitles if available
     if state["subtitle_path"]:
         send_mpv_command({"command": ["sub-add", state["subtitle_path"], "select"]})
+        # Apply default subtitle delay only for SRT subs
+        if state["subtitle_path"].endswith(".srt") and state["subtitle_delay"] is not None:
+            send_mpv_command({"command": ["set_property", "sub-delay", state["subtitle_delay"]]})
 
     state["playing"] = True
     state["playing_video_path"] = state["video_path"]

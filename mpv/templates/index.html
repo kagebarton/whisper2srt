@@ -470,6 +470,9 @@
     nonvocal: null,
     subtitle: null,
   };
+  // Server-side defaults — used by resetUI so sliders reflect actual defaults
+  const DEFAULT_VOCAL_VOL_PCT = {{ default_vocal_vol_pct }};
+  const DEFAULT_SUB_DELAY_MS = {{ default_sub_delay_ms }};
   let playing = document.getElementById('playPauseBtn').textContent.includes('Pause');
   let seeking = false;
   let pollInterval = null;
@@ -747,13 +750,13 @@
     document.getElementById('seekBar').value = 0;
     document.getElementById('timeElapsed').textContent = '0:00';
     document.getElementById('timeTotal').textContent = '0:00';
-    vocalVol.value = 100;
-    document.getElementById('vocalVolVal').textContent = '100%';
+    vocalVol.value = DEFAULT_VOCAL_VOL_PCT;
+    document.getElementById('vocalVolVal').textContent = `${DEFAULT_VOCAL_VOL_PCT}%`;
     pitchSlider.value = 0;
     document.getElementById('pitchVal').textContent = '0 st';
-    subDelaySlider.value = 0;
-    document.getElementById('subDelayVal').textContent = '+0.0s';
-    _srtDelay = 0;
+    subDelaySlider.value = DEFAULT_SUB_DELAY_MS;
+    document.getElementById('subDelayVal').textContent = fmtDelay(DEFAULT_SUB_DELAY_MS);
+    _srtDelay = DEFAULT_SUB_DELAY_MS;
     stopPolling();
   }
 
@@ -782,7 +785,9 @@
 
   // ── Vocal volume ───────────────────────────────────────
   const vocalVol = document.getElementById('vocalVol');
+  let adjustingVocalVol = false;
   vocalVol.addEventListener('input', () => {
+    adjustingVocalVol = true;
     document.getElementById('vocalVolVal').textContent = `${vocalVol.value}%`;
   });
   vocalVol.addEventListener('change', () => {
@@ -790,7 +795,7 @@
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ volume: parseInt(vocalVol.value) }),
-    });
+    }).finally(() => { adjustingVocalVol = false; });
   });
 
   function stepVolume(delta) {
@@ -799,13 +804,21 @@
     let val = Math.max(min, Math.min(max, parseInt(vocalVol.value) + delta));
     vocalVol.value = val;
     document.getElementById('vocalVolVal').textContent = `${val}%`;
+    adjustingVocalVol = true;
     debounce(() => {
       fetch('/api/volume', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ volume: parseInt(vocalVol.value) }),
-      });
+      }).finally(() => { adjustingVocalVol = false; });
     }, 300, '_vol');
+  }
+
+  function syncVocalVol(pct) {
+    if (!adjustingVocalVol) {
+      vocalVol.value = pct;
+      document.getElementById('vocalVolVal').textContent = `${pct}%`;
+    }
   }
 
   // ── Pitch ──────────────────────────────────────────────
@@ -844,11 +857,13 @@
 
   // ── Subtitle delay ─────────────────────────────────────
   const subDelaySlider = document.getElementById('subDelaySlider');
+  let adjustingSubDelay = false;
   function fmtDelay(ms) {
     const s = ms / 1000;
     return `${s >= 0 ? '+' : ''}${s.toFixed(1)}s`;
   }
   subDelaySlider.addEventListener('input', () => {
+    adjustingSubDelay = true;
     document.getElementById('subDelayVal').textContent = fmtDelay(parseInt(subDelaySlider.value));
   });
   subDelaySlider.addEventListener('change', () => {
@@ -858,7 +873,7 @@
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ delay: ms / 1000 }),
-    });
+    }).finally(() => { adjustingSubDelay = false; });
   });
 
   function stepSubDelay(deltaMs) {
@@ -868,13 +883,22 @@
     subDelaySlider.value = val;
     document.getElementById('subDelayVal').textContent = fmtDelay(val);
     _srtDelay = val;
+    adjustingSubDelay = true;
     debounce(() => {
       fetch('/api/sub_delay', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ delay: parseInt(subDelaySlider.value) / 1000 }),
-      });
+      }).finally(() => { adjustingSubDelay = false; });
     }, 300, '_sub');
+  }
+
+  function syncSubDelay(ms) {
+    if (!adjustingSubDelay) {
+      subDelaySlider.value = ms;
+      document.getElementById('subDelayVal').textContent = fmtDelay(ms);
+      _srtDelay = ms;
+    }
   }
 
   // ── Master volume ──────────────────────────────────────
@@ -939,6 +963,8 @@
           document.getElementById('timeElapsed').textContent = fmtTime(state.position);
           document.getElementById('timeTotal').textContent = fmtTime(state.duration);
           syncMasterVol(d.master_volume ?? 100);
+          syncVocalVol(Math.round(d.vocal_volume * 100));
+          syncSubDelay(Math.round(d.subtitle_delay * 1000));
         });
     }, 500);
   }
