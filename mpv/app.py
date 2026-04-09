@@ -33,6 +33,12 @@ TIMECODE_COLOR   = "&HAAD5FF&"   # "1:23 / 3:45 | Transpose: +2 | Vocals: 80%"
 UPNEXT_COLOR     = "&HB48246&"   # "Up Next: <title>"
 CLOCK_COLOR      = "&HFFFFFF&"   # Clock (bottom-left)
 
+# ── Volume normalization ───────────────────────────────────────────────────────
+# Applied to the final mix output (both single and dual-stem). Parent project
+# toggles this; value is in dB (negative = attenuation, positive = boost).
+NORMALIZATION_ENABLED = False
+NORMALIZATION_DB = -40.0
+
 # ── SRT subtitle style ─────────────────────────────────────────────────────────
 # Applied to SRT subtitle tracks. sub-ass-override=no ensures ASS/karaoke tracks
 # use their own embedded styles and are unaffected by these properties.
@@ -202,8 +208,14 @@ def close_overlay_sock():
 
 def build_filter(vocal_vol, pitch, dual_stem):
     """Rebuild the lavfi-complex string with per-track rubberband settings."""
+    norm_vol = f"{NORMALIZATION_DB}dB" if NORMALIZATION_ENABLED else None
+
     if dual_stem:
-        # Dual-stem: vocal + non-vocal stems with amix
+        # Dual-stem: vocal + non-vocal stems with amix, then normalization on final mix
+        if norm_vol:
+            amix_out = f'[vocal][nonvocal]amix=inputs=2:normalize=0[mixed];[mixed]volume={norm_vol}[ao]'
+        else:
+            amix_out = f'[vocal][nonvocal]amix=inputs=2:normalize=0[ao]'
         return (
             f'[aid2]volume@vocalvol={vocal_vol},'
             f'rubberband@vocalrb=pitch={pitch}'
@@ -227,12 +239,15 @@ def build_filter(vocal_vol, pitch, dual_stem):
             f':channels=apart'
             f':smoothing=off'
             f'[nonvocal];'
-            f'[vocal][nonvocal]amix=inputs=2:normalize=0[ao]'
+            f'{amix_out}'
         )
     else:
-        # Single-stem: video's native audio with rubberband
-        return (
-            f'[aid1]rubberband@rb=pitch={pitch}'
+        # Single-stem: normalization before rubberband, then pitch processing
+        if norm_vol:
+            stem = f'[aid1]volume={norm_vol}[pre];[pre]rubberband@rb=pitch={pitch}'
+        else:
+            stem = f'[aid1]rubberband@rb=pitch={pitch}'
+        rest = (
             f':pitchq=quality'
             f':transients=crisp'
             f':detector=compound'
@@ -243,6 +258,7 @@ def build_filter(vocal_vol, pitch, dual_stem):
             f':smoothing=off'
             f'[ao]'
         )
+        return stem + rest
 
 
 def send_mpv_command(cmd_dict):
