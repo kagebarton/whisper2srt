@@ -12,6 +12,7 @@ from pathlib import Path
 import qrcode
 from PIL import Image, ImageFont
 from flask import Flask, render_template, request, jsonify
+import zmq
 
 app = Flask(__name__)
 
@@ -212,12 +213,13 @@ def build_filter(vocal_vol, pitch, dual_stem):
 
     if dual_stem:
         # Dual-stem: vocal + non-vocal stems with amix, then normalization on final mix
+        zmq_bind = ",azmq=bind_address=tcp\\\\://127.0.0.1\\\\:5556"
         if norm_vol:
             amix_out = f'[vocal][nonvocal]amix=inputs=2:normalize=0[mixed];[mixed]volume={norm_vol}[ao]'
         else:
             amix_out = f'[vocal][nonvocal]amix=inputs=2:normalize=0[ao]'
         return (
-            f'[aid2]volume@vocalvol={vocal_vol},'
+            f'[aid2]volume@vocalvol={vocal_vol}{zmq_bind},'
             f'rubberband@vocalrb=pitch={pitch}'
             f':pitchq=quality'
             f':transients=crisp'
@@ -707,9 +709,16 @@ def seek():
 def set_volume():
     vol_pct = request.json.get("volume", 100)
     state["vocal_volume"] = float(vol_pct) / 100.0
-    if state["playing"]:
-        fc = build_filter(state["vocal_volume"], semitones_to_pitch(state["semitones"]), state["dual_stem"])
-        send_mpv_command({"command": ["set_property", "lavfi-complex", fc]})
+    if state["playing"] and state["dual_stem"]:
+        try:
+            ctx = zmq.Context()
+            sock = ctx.socket(zmq.REQ)
+            sock.setsockopt(zmq.RCVTIMEO, 2000)
+            sock.connect("tcp://127.0.0.1:5556")
+            sock.send_string(f"volume@vocalvol volume {state['vocal_volume']}")
+            sock.recv()
+        except zmq.ZMQError:
+            pass
     send_timecode_overlay()
     return jsonify({"ok": True})
 
