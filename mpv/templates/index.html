@@ -473,6 +473,7 @@
   // Server-side defaults — used by resetUI so sliders reflect actual defaults
   const DEFAULT_VOCAL_VOL_PCT = {{ default_vocal_vol_pct }};
   const DEFAULT_SUB_DELAY_MS = {{ default_sub_delay_ms }};
+  const DEFAULT_PITCH_SEMITONES = {{ default_pitch_st }};
   let playing = document.getElementById('playPauseBtn').textContent.includes('Pause');
   let seeking = false;
   let pollInterval = null;
@@ -752,8 +753,8 @@
     document.getElementById('timeTotal').textContent = '0:00';
     vocalVol.value = DEFAULT_VOCAL_VOL_PCT;
     document.getElementById('vocalVolVal').textContent = `${DEFAULT_VOCAL_VOL_PCT}%`;
-    pitchSlider.value = 0;
-    document.getElementById('pitchVal').textContent = '0 st';
+    pitchSlider.value = DEFAULT_PITCH_SEMITONES;
+    document.getElementById('pitchVal').textContent = SEMITONE_LABELS[String(DEFAULT_PITCH_SEMITONES)] || `${DEFAULT_PITCH_SEMITONES > 0 ? '+' : ''}${DEFAULT_PITCH_SEMITONES} st`;
     subDelaySlider.value = DEFAULT_SUB_DELAY_MS;
     document.getElementById('subDelayVal').textContent = fmtDelay(DEFAULT_SUB_DELAY_MS);
     _srtDelay = DEFAULT_SUB_DELAY_MS;

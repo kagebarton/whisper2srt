@@ -79,6 +79,8 @@ DEFAULT_VIDEO    = os.path.join(SONG_DIR, "selfish.mp4")
 DEFAULT_SRT_SUB_DELAY = -0.8
 # DEFAULT_VOCAL_VOLUME: 0.0–1.0 vocal stem volume, applied only when dual-stem is available
 DEFAULT_VOCAL_VOLUME  = 0.4
+# DEFAULT_STARTING_PITCH: initial pitch shift in semitones (applied to all songs on load)
+DEFAULT_STARTING_PITCH = -1
 
 def derive_companion_paths(video_path):
     """Given a video path, return derived companion file paths."""
@@ -103,7 +105,7 @@ state = {
     "subtitle_path": None,
     "subtitle_delay": DEFAULT_SRT_SUB_DELAY,
     "vocal_volume": DEFAULT_VOCAL_VOLUME,
-    "semitones": 0,            # -3 to +3, mapped to pitch via 2^(st/12)
+    "semitones": DEFAULT_STARTING_PITCH,
     "playing": False,
     "duration": 0.0,
     "position": 0.0,
@@ -321,7 +323,7 @@ def reset_state_defaults():
     state["position"] = 0.0
     state["duration"] = 0.0
     state["vocal_volume"] = DEFAULT_VOCAL_VOLUME
-    state["semitones"] = 0
+    state["semitones"] = DEFAULT_STARTING_PITCH
     state["subtitle_delay"] = DEFAULT_SRT_SUB_DELAY
     state["dual_stem"] = False
 
@@ -604,7 +606,8 @@ def poll_position():
 def index():
     return render_template("index.html", state=state,
                            default_vocal_vol_pct=int(DEFAULT_VOCAL_VOLUME * 100),
-                           default_sub_delay_ms=int(DEFAULT_SRT_SUB_DELAY * 1000))
+                           default_sub_delay_ms=int(DEFAULT_SRT_SUB_DELAY * 1000),
+                           default_pitch_st=DEFAULT_STARTING_PITCH)
 
 
 @app.route("/api/files", methods=["POST"])
@@ -649,7 +652,7 @@ def play():
         send_mpv_command({"command": ["audio-add", state["nonvocal_path"]]})
         time.sleep(0.2)
 
-    fc = build_filter(state["vocal_volume"], semitones_to_pitch(0), dual)
+    fc = build_filter(state["vocal_volume"], semitones_to_pitch(state["semitones"]), dual)
     send_mpv_command({"command": ["set_property", "lavfi-complex", fc]})
 
     # Add subtitles if available
