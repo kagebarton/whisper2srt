@@ -525,9 +525,16 @@
     files.vocal = files.nonvocal = files.subtitle = null;
   }
 
-  // Cached subtitle data for mode switching without re-fetching
+  // Pending subtitle data for the file selected in the browser (next play).
+  // Gets overwritten every time the user clicks a file in the browser.
   let _assData = null;
   let _srtData = null;
+  // Active subtitle data for the currently-playing song. Captured from pending
+  // when /api/play succeeds; used by the subtitle-mode buttons and _updateSubModeUI
+  // so that selecting a new file in the browser cannot alter the UI state of the
+  // song still playing.
+  let _activeAssData = null;
+  let _activeSrtData = null;
   let _srtDelay = 0;  // cached SRT subtitle delay (ms), reset when leaving SRT mode
 
   // Helper: set subtitle delay on slider, label, and backend
@@ -557,9 +564,9 @@
         document.getElementById('lblNonvocal').textContent = nonvocal.exists ? basename(nonvocal.path) : '—';
         files.nonvocal = nonvocal.exists ? nonvocal.path : null;
 
-        // Show/hide vocal volume row based on dual-stem
-        const dualStem = vocal.exists && nonvocal.exists;
-        document.getElementById('vocalVolRow').style.display = dualStem ? '' : 'none';
+        // Vocal volume row visibility is NOT updated here — would leak the
+        // pending file's state into the currently playing song. It's updated
+        // on /api/play success, when pending becomes active.
 
         // Cache subtitle data
         _assData = data.ass;
@@ -578,30 +585,42 @@
   }
 
   function updateSubControl(assData, srtData) {
-    document.getElementById('subBtnKaraoke').disabled = !assData.exists;
-    document.getElementById('subBtnSrt').disabled     = !srtData.exists;
+    // Cache the subtitle data for later use
+    if (assData) _assData = assData;
+    if (srtData) _srtData = srtData;
 
     // Determine default: karaoke > srt > off
     let defaultMode = 'off';
     if (assData.exists) defaultMode = 'karaoke';
     else if (srtData.exists) defaultMode = 'srt';
-    setSubMode(defaultMode, assData, srtData);
+
+    // Set files.subtitle for the next file — no UI changes here.
+    // All UI updates (button active state, disabled state, sub delay row)
+    // happen in _updateSubModeUI(), called only when /api/play succeeds.
+    _updateSubModeState(defaultMode);
+    sendFiles();
   }
 
-  function setSubMode(mode, assData, srtData) {
-    // assData/srtData can be cached from last derive_files call
-    if (assData) _assData = assData;
-    if (srtData) _srtData = srtData;
+  // Internal: just set files.subtitle based on mode
+  function _updateSubModeState(mode) {
+    files.subtitle = mode === 'karaoke' ? _assData?.path
+                   : mode === 'srt'     ? _srtData?.path
+                   : null;
+  }
+
+  // Update all subtitle UI to match the currently-playing (active) file.
+  // Reads from _activeAssData/_activeSrtData, NOT from pending _assData/_srtData,
+  // so selecting a new file in the browser cannot mutate the live UI state.
+  function _updateSubModeUI(mode) {
+    // Enable/disable buttons based on what the active song has available
+    document.getElementById('subBtnKaraoke').disabled = !_activeAssData?.exists;
+    document.getElementById('subBtnSrt').disabled     = !_activeSrtData?.exists;
 
     ['karaoke','srt','off'].forEach(m => {
       const key = m.charAt(0).toUpperCase() + m.slice(1);
       document.getElementById('subBtn' + key)
         .classList.toggle('active', m === mode);
     });
-
-    files.subtitle = mode === 'karaoke' ? _assData?.path
-                   : mode === 'srt'     ? _srtData?.path
-                   : null;
 
     // Show/hide sub delay
     document.getElementById('subDelayRow').style.display = mode === 'srt' ? '' : 'none';
@@ -613,15 +632,23 @@
       _srtDelay = parseInt(subDelaySlider.value);
       _applySubDelay(0);
     }
+  }
 
-    // Live-switch subtitle in MPV if playing
+  // User clicked a subtitle mode button while a song is (or isn't) playing.
+  // Operates on _active* data — does NOT touch pending files.subtitle or call
+  // sendFiles(), so the browser's file pre-selection state stays intact.
+  function setSubMode(mode) {
+    _updateSubModeUI(mode);
+
+    const path = mode === 'karaoke' ? _activeAssData?.path
+               : mode === 'srt'     ? _activeSrtData?.path
+               : null;
+
     fetch('/api/sub_mode', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subtitle_path: files.subtitle }),
+      body: JSON.stringify({ subtitle_path: path }),
     });
-
-    sendFiles();
   }
 
   function basename(path) {
@@ -737,6 +764,28 @@
           if (d.ok) {
             playing = true;
             document.getElementById('playPauseBtn').textContent = '⏸ Pause';
+
+            // Vocal volume row reflects the now-playing song's dual-stem
+            // status (pending just became active).
+            document.getElementById('vocalVolRow').style.display =
+              (files.vocal && files.nonvocal) ? '' : 'none';
+
+            // Reset all per-song controls (vocal volume, pitch, sub delay)
+            // to defaults. Backend already called reset_state_defaults() at
+            // the start of /api/play, so no extra API calls are needed —
+            // just sync the UI sliders to the matching defaults.
+            _resetSongControls();
+
+            // Capture pending subtitle data as "active" for the now-playing
+            // song. From this point on, _updateSubModeUI and setSubMode read
+            // from _active* — selecting a new file in the browser updates
+            // pending _assData/_srtData but leaves active alone.
+            _activeAssData = _assData;
+            _activeSrtData = _srtData;
+            let mode = 'off';
+            if (_activeAssData?.exists) mode = 'karaoke';
+            else if (_activeSrtData?.exists) mode = 'srt';
+            _updateSubModeUI(mode);
             startPolling();
           }
         });
@@ -745,12 +794,10 @@
     }
   }
 
-  function resetUI() {
-    playing = false;
-    document.getElementById('playPauseBtn').textContent = '▶ Play';
-    document.getElementById('seekBar').value = 0;
-    document.getElementById('timeElapsed').textContent = '0:00';
-    document.getElementById('timeTotal').textContent = '0:00';
+  // Reset all per-song controls to their defaults. Called on both /api/play
+  // (entering a new song) and resetUI (stopping playback). Master volume is
+  // NOT reset — it's system-wide and persists across songs.
+  function _resetSongControls() {
     vocalVol.value = DEFAULT_VOCAL_VOL_PCT;
     document.getElementById('vocalVolVal').textContent = `${DEFAULT_VOCAL_VOL_PCT}%`;
     pitchSlider.value = DEFAULT_PITCH_SEMITONES;
@@ -758,6 +805,20 @@
     subDelaySlider.value = DEFAULT_SUB_DELAY_MS;
     document.getElementById('subDelayVal').textContent = fmtDelay(DEFAULT_SUB_DELAY_MS);
     _srtDelay = DEFAULT_SUB_DELAY_MS;
+  }
+
+  function resetUI() {
+    playing = false;
+    document.getElementById('playPauseBtn').textContent = '▶ Play';
+    document.getElementById('seekBar').value = 0;
+    document.getElementById('timeElapsed').textContent = '0:00';
+    document.getElementById('timeTotal').textContent = '0:00';
+    _resetSongControls();
+    // No song is active once playback stops; refresh subtitle UI so the
+    // karaoke/srt buttons return to a neutral state.
+    _activeAssData = null;
+    _activeSrtData = null;
+    _updateSubModeUI('off');
     stopPolling();
   }
 

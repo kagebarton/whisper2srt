@@ -211,7 +211,12 @@ class MpvController:
 
     @_safe
     def sub_remove(self) -> None:
-        self._player.sub_remove()
+        # `sub-remove` (no arg) removes the *current* track; libmpv errors
+        # with MPV_ERROR_COMMAND (-12) if nothing is selected. Skip when the
+        # current-tracks property already shows no sub is loaded.
+        if self._player.sid in (None, False, 0, "no"):
+            return
+        self._player.command("sub-remove")
 
     @_safe
     def set_sub_delay(self, seconds: float) -> None:

@@ -565,9 +565,13 @@ def set_sub_delay():
 
 @app.route("/api/sub_mode", methods=["POST"])
 def set_sub_mode():
-    """Switch the active subtitle file during playback."""
+    """Switch the active subtitle file during playback.
+
+    Does NOT write state["subtitle_path"] — that is owned by /api/files and
+    is read by /api/play for the next song. Writing it here would contaminate
+    the pending subtitle for a pre-selected next file.
+    """
     path = request.json.get("subtitle_path")
-    state["subtitle_path"] = path
     if state["playing"]:
         controller.sub_remove()
         if path:

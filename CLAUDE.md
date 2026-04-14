@@ -6,12 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A karaoke mixer web app (`mpv/`) that controls MPV playback of a video mixed with separate vocal and instrumental stems. Features real-time pitch shifting, volume control, subtitle support, and a file browser UI.
 
+## Communication style
+
+Use very concise explanations. Avoid lengthy summaries or over-explanation. Be direct about what was changed and why.
+
 ## Development environment
 
-This project runs in a conda environment named `avtest`. Activate it before working:
+This project runs in a conda environment named `pik`. Activate it before working:
 
 ```bash
-conda activate avtest
+conda activate pik
 ```
 
 ## Plans
@@ -34,15 +38,14 @@ Requires `mpv` on `$PATH`.
 ## Architecture
 
 ```
-Browser UI  ──HTTP/JSON──►  Flask (app.py)  ──UNIX socket──►  mpv process
+Browser UI  ──HTTP/JSON──►  Flask (app.py)  ──libmpv bindings──►  mpv in-process
 ```
 
-**`mpv/app.py`** — the entire backend. Key responsibilities:
-- Launches MPV as a subprocess with three tracks: video + vocal `.m4a` + nonvocal `.m4a`, mixed via `--lavfi-complex`
-- Communicates with MPV via newline-delimited JSON over a UNIX socket (`/tmp/mpv-socket`)
-- A background thread polls `time-pos` and `duration` from MPV every 500ms
-- Volume and pitch changes rebuild the entire `lavfi-complex` filter string and push it live via `set_property`
-- Pitch is converted from semitones (±6) to a multiplier via `2^(st/12)` and applied via `rubberband` filter on both stems
+**`mpv/app.py`** — the entire backend. Owns `MpvController` (wraps libmpv). Key responsibilities:
+- Launches MPV in-process via python-mpv bindings (three audio tracks: video + vocal + nonvocal, mixed via `lavfi-complex`)
+- Event-driven architecture: property observers for time-pos, duration, idle-active, osd dimensions
+- Volume and pitch changes rebuild `lavfi-complex` and send live via `controller.set_lavfi_complex()`
+- Pitch converted: semitones (±6) → multiplier `2^(st/12)` → `rubberband` filter on both stems
 
 **`mpv/templates/index.html`** — single-page UI with file browser, seek bar, vocal volume slider, pitch slider, subtitle delay control.
 
@@ -53,6 +56,13 @@ The filter mixes two audio tracks:
 - Both → `amix=inputs=2:normalize=0` → `[ao]`
 
 The entire filter string is rebuilt and re-sent to MPV on every volume or pitch change.
+
+### Subtitle handling
+Browser maintains two subtitle data caches:
+- `_assData`/`_srtData` (pending): next file selected in browser
+- `_activeAssData`/`_activeSrtData` (active): currently-playing file
+
+UI buttons read from active cache, preventing file-selection from corrupting live UI state.
 
 ### State
 A single `state` dict in `app.py` holds all runtime state: file paths, vocal volume, semitones, playing flag, position, duration, subtitle delay.
