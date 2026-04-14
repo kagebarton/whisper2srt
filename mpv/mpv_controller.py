@@ -181,7 +181,7 @@ class MpvController:
 
     @_safe
     def seek_absolute(self, seconds: float) -> None:
-        self._player.seek(seconds, "absolute")
+        self._player.command("seek", seconds, "absolute")
 
     @_safe
     def toggle_pause(self) -> None:
