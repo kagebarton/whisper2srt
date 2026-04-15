@@ -94,8 +94,9 @@ state = {
     "video_path": DEFAULT_VIDEO,
     "vocal_path": None,
     "nonvocal_path": None,
-    "subtitle_path": None,
-    "subtitle_delay": DEFAULT_SRT_SUB_DELAY,
+    "subtitle_mode":      "off",
+    "srt_delay":          DEFAULT_SRT_SUB_DELAY,
+    "subtitle_available": {"ass": None, "srt": None},
     "vocal_volume": DEFAULT_VOCAL_VOLUME,
     "semitones": DEFAULT_STARTING_PITCH,
     "playing": False,
@@ -214,8 +215,43 @@ def reset_state_defaults():
     state["duration"] = 0.0
     state["vocal_volume"] = DEFAULT_VOCAL_VOLUME
     state["semitones"] = DEFAULT_STARTING_PITCH
-    state["subtitle_delay"] = DEFAULT_SRT_SUB_DELAY
+    state["subtitle_mode"]      = "off"
+    state["srt_delay"]          = DEFAULT_SRT_SUB_DELAY  # Invariant 1: reset per-song
+    state["subtitle_available"] = {"ass": None, "srt": None}
     state["dual_stem"] = False
+
+
+def _apply_subtitle_mode(mode, *, skip_remove=False):
+    """Atomic: update state, remove current sub, add new, apply delay.
+    Invariant: sub_delay is 0.0 for any mode != 'srt'.
+
+    Caller must ensure mpv has a video loaded. Does NOT gate on
+    state['playing'] — /api/play calls this while 'playing' is still False
+    to keep _on_idle_active from firing on_song_end during sub_add.
+    /api/subtitle gates the call externally when nothing is playing.
+
+    Args:
+        skip_remove: When True, skip the sub_remove() call.  Used on
+            initial play where mpv may have auto-loaded a matching subtitle;
+            calling sub-remove on that auto-loaded track while lavfi-complex
+            is active triggers a libmpv segfault.  sub_add(..., "select")
+            alone correctly replaces the active subtitle without the crash.
+    """
+    state["subtitle_mode"] = mode
+    path = None
+    if   mode == "karaoke": path = state["subtitle_available"]["ass"]
+    elif mode == "srt":     path = state["subtitle_available"]["srt"]
+    if not skip_remove:
+        controller.sub_remove()
+    if path:
+        controller.sub_add(path, "select")
+        if mode == "srt":
+            controller.apply_srt_style(SRT_STYLE)
+            controller.set_sub_delay(state["srt_delay"])
+        else:
+            controller.set_sub_delay(0.0)  # Invariant 2: no delay for ASS
+    else:
+        controller.set_sub_delay(0.0)
 
 
 def start_mpv():
@@ -438,7 +474,6 @@ def set_files():
     state["video_path"] = data.get("video")
     state["vocal_path"] = data.get("vocal")
     state["nonvocal_path"] = data.get("nonvocal")
-    state["subtitle_path"] = data.get("subtitle")
     send_upnext_overlay()
     return jsonify({"ok": True})
 
@@ -470,11 +505,18 @@ def play():
     fc = build_filter(state["vocal_volume"], semitones_to_pitch(state["semitones"]), dual)
     controller.set_lavfi_complex(fc)
 
-    if state["subtitle_path"]:
-        controller.sub_add(state["subtitle_path"], "select")
-        if state["subtitle_path"].endswith(".srt") and state["subtitle_delay"] is not None:
-            controller.set_sub_delay(state["subtitle_delay"])
+    companions = derive_companion_paths(state["video_path"])
+    state["subtitle_available"] = {
+        "ass": companions["ass"] if Path(companions["ass"]).exists() else None,
+        "srt": companions["srt"] if Path(companions["srt"]).exists() else None,
+    }
+    if   state["subtitle_available"]["ass"]: default_mode = "karaoke"
+    elif state["subtitle_available"]["srt"]: default_mode = "srt"
+    else:                                    default_mode = "off"
+    _apply_subtitle_mode(default_mode, skip_remove=True)
 
+    # Set playing=True LAST so _on_idle_active cannot fire on_song_end
+    # during any of the subtitle/audio setup above.
     state["playing"] = True
     state["playing_video_path"] = state["video_path"]
     send_nowplaying_overlay()
@@ -553,31 +595,20 @@ def set_pitch():
     return jsonify({"ok": True})
 
 
-@app.route("/api/sub_delay", methods=["POST"])
-def set_sub_delay():
-    """Set subtitle delay in seconds (positive = delay, negative = advance)."""
-    delay = request.json.get("delay", 0)
-    state["subtitle_delay"] = float(delay)
-    if state["playing"]:
-        controller.set_sub_delay(float(delay))
-    return jsonify({"ok": True})
-
-
-@app.route("/api/sub_mode", methods=["POST"])
-def set_sub_mode():
-    """Switch the active subtitle file during playback.
-
-    Does NOT write state["subtitle_path"] — that is owned by /api/files and
-    is read by /api/play for the next song. Writing it here would contaminate
-    the pending subtitle for a pre-selected next file.
-    """
-    path = request.json.get("subtitle_path")
-    if state["playing"]:
-        controller.sub_remove()
-        if path:
-            controller.sub_add(path, "select")
-            if path.endswith(".srt"):
-                apply_srt_style()
+@app.route("/api/subtitle", methods=["POST"])
+def api_subtitle():
+    """Atomic endpoint for subtitle mode and/or SRT delay changes."""
+    data = request.get_json() or {}
+    if "srt_delay" in data:
+        state["srt_delay"] = float(data["srt_delay"])
+    if "mode" in data:
+        if state["playing"]:
+            _apply_subtitle_mode(data["mode"])
+        else:
+            state["subtitle_mode"] = data["mode"]
+    elif state["subtitle_mode"] == "srt" and state["playing"]:
+        # delay-only update while in SRT mode
+        controller.set_sub_delay(state["srt_delay"])
     return jsonify({"ok": True})
 
 
@@ -612,14 +643,16 @@ def set_master_volume():
 @app.route("/api/status", methods=["GET"])
 def status():
     return jsonify({
-        "playing": state["playing"],
-        "position": state["position"],
-        "duration": state["duration"],
-        "vocal_volume": state["vocal_volume"],
-        "semitones": state["semitones"],
-        "subtitle_delay": state["subtitle_delay"],
-        "dual_stem": state["dual_stem"],
-        "master_volume": get_master_volume_pct(),
+        "playing":            state["playing"],
+        "position":           state["position"],
+        "duration":           state["duration"],
+        "vocal_volume":       state["vocal_volume"],
+        "semitones":          state["semitones"],
+        "subtitle_mode":      state["subtitle_mode"],
+        "srt_delay":          state["srt_delay"],
+        "subtitle_available": state["subtitle_available"],
+        "dual_stem":          state["dual_stem"],
+        "master_volume":      get_master_volume_pct(),
     })
 
 

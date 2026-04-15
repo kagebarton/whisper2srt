@@ -437,12 +437,12 @@
   </div>
 
   <!-- Subtitle delay -->
-  <div class="slider-row" id="subDelayRow"{{ ' style="display:none"' if not (state.subtitle_path and state.subtitle_path.endswith('.srt')) else '' }}>
+  <div class="slider-row" id="subDelayRow" style="display:none">
     <label>Sub Delay</label>
     <button class="step-btn" onclick="stepSubDelay(-100)" title="Decrease delay">−</button>
-    <input type="range" id="subDelaySlider" min="-5000" max="5000" step="50" value="{{ (state.subtitle_delay * 1000) | int }}">
+    <input type="range" id="subDelaySlider" min="-5000" max="5000" step="50" value="{{ default_sub_delay_ms }}">
     <button class="step-btn" onclick="stepSubDelay(100)" title="Increase delay">+</button>
-    <span class="val" id="subDelayVal">{{ '%+.1fs' % state.subtitle_delay if state.subtitle_delay else '0.0s' }}</span>
+    <span class="val" id="subDelayVal">{{ '%+.1fs' % (default_sub_delay_ms / 1000) }}</span>
   </div>
 </div>
 
@@ -479,8 +479,6 @@
       video:    document.getElementById('videoPath').value || null,
       vocal:    null,
       nonvocal: null,
-      subtitle: null,
-      subMode:  'off',   // 'karaoke' | 'srt' | 'off'
       companions: {
         vocal:    { path: null, exists: false },
         nonvocal: { path: null, exists: false },
@@ -488,23 +486,21 @@
         srt:      { path: null, exists: false },
       },
     },
-    // Snapshot of what is currently playing — frozen at /api/play success
+    // Snapshot of what is currently playing — populated by polling after /api/play
     active: {
       playing:   document.getElementById('playPauseBtn').textContent.includes('Pause'),
       videoPath: null,
       dualStem:  false,
-      subMode:   'off',
-      companions: {
-        ass: { path: null, exists: false },
-        srt: { path: null, exists: false },
+      subtitle: {
+        mode:      'off',                         // mirrored from server
+        available: { ass: null, srt: null },      // mirrored from server
+        srtDelay:  DEFAULT_SUB_DELAY_MS / 1000,  // seconds; sticky across mode switches
       },
     },
     // Per-song controls — reset to defaults on every play
     controls: {
-      vocalVolume:  DEFAULT_VOCAL_VOL_PCT,
-      pitch:        DEFAULT_PITCH_SEMITONES,
-      subDelay:     DEFAULT_SUB_DELAY_MS,
-      srtDelayCache: DEFAULT_SUB_DELAY_MS,
+      vocalVolume: DEFAULT_VOCAL_VOL_PCT,
+      pitch:       DEFAULT_PITCH_SEMITONES,
     },
     // System-wide — persists across songs
     system: {
@@ -522,6 +518,8 @@
       subDelay:  false,
       masterVol: false,
     },
+    // Sync-id guard: prevents polling from clobbering in-flight subtitle mutations
+    subtitleMutation: { id: 0, committed: 0 },
   };
 
   let pollInterval = null;
@@ -583,21 +581,21 @@
       $('masterVolVal').textContent = `${S.system.masterVolume}%`;
     }
 
-    // Subtitle mode buttons — keyed off ACTIVE companions
-    const activeAss = S.active.companions.ass;
-    const activeSrt = S.active.companions.srt;
-    $('subBtnKaraoke').disabled = !activeAss?.exists;
-    $('subBtnSrt').disabled     = !activeSrt?.exists;
+    // Subtitle mode buttons — keyed off active subtitle state
+    const sub = S.active.subtitle;
+    $('subBtnKaraoke').disabled = !sub.available.ass;
+    $('subBtnSrt').disabled     = !sub.available.srt;
     ['karaoke', 'srt', 'off'].forEach(m => {
       const key = m.charAt(0).toUpperCase() + m.slice(1);
-      $('subBtn' + key).classList.toggle('active', m === S.active.subMode);
+      $('subBtn' + key).classList.toggle('active', m === sub.mode);
     });
 
     // Sub delay row — only visible in SRT mode
-    $('subDelayRow').style.display = S.active.subMode === 'srt' ? '' : 'none';
+    $('subDelayRow').style.display = sub.mode === 'srt' ? '' : 'none';
     if (!S.locks.subDelay) {
-      $('subDelaySlider').value = S.controls.subDelay;
-      $('subDelayVal').textContent = fmtDelay(S.controls.subDelay);
+      const ms = Math.round(sub.srtDelay * 1000);
+      $('subDelaySlider').value    = ms;
+      $('subDelayVal').textContent = fmtDelay(ms);
     }
 
     // Companion checkboxes — always reflect PENDING selection
@@ -624,17 +622,17 @@
     draft.active.playing   = false;
     draft.active.videoPath = null;
     draft.active.dualStem  = false;
-    draft.active.subMode   = 'off';
-    draft.active.companions = {
-      ass: { path: null, exists: false },
-      srt: { path: null, exists: false },
+    draft.active.subtitle  = {
+      mode:      'off',
+      available: { ass: null, srt: null },
+      srtDelay:  DEFAULT_SUB_DELAY_MS / 1000,
     };
-    draft.controls.vocalVolume   = DEFAULT_VOCAL_VOL_PCT;
-    draft.controls.pitch         = DEFAULT_PITCH_SEMITONES;
-    draft.controls.subDelay      = DEFAULT_SUB_DELAY_MS;
-    draft.controls.srtDelayCache = DEFAULT_SUB_DELAY_MS;
-    draft.transport.position = 0;
-    draft.transport.duration = 0;
+    draft.controls.vocalVolume = DEFAULT_VOCAL_VOL_PCT;
+    draft.controls.pitch       = DEFAULT_PITCH_SEMITONES;
+    draft.transport.position   = 0;
+    draft.transport.duration   = 0;
+    S.subtitleMutation.id        = 0;
+    S.subtitleMutation.committed = 0;
   }
 
   // ── Initialization ─────────────────────────────────────
@@ -656,7 +654,6 @@
         video:    S.pending.video,
         vocal:    S.pending.vocal,
         nonvocal: S.pending.nonvocal,
-        subtitle: S.pending.subtitle,
       }),
     });
   }
@@ -674,14 +671,7 @@
 
           draft.pending.vocal    = data.vocal.exists    ? data.vocal.path    : null;
           draft.pending.nonvocal = data.nonvocal.exists ? data.nonvocal.path : null;
-
-          // Auto-select best subtitle mode for next play
-          draft.pending.subMode  = data.ass.exists ? 'karaoke'
-                                 : data.srt.exists ? 'srt'
-                                 : 'off';
-          draft.pending.subtitle = draft.pending.subMode === 'karaoke' ? data.ass.path
-                                 : draft.pending.subMode === 'srt'     ? data.srt.path
-                                 : null;
+          // Subtitle mode is resolved server-side on /api/play; no pending.subtitle needed
         });
         sendFiles();
       });
@@ -695,8 +685,7 @@
       updateCompanionFiles(path);
     } else {
       update(draft => {
-        draft.pending.vocal = draft.pending.nonvocal = draft.pending.subtitle = null;
-        draft.pending.subMode = 'off';
+        draft.pending.vocal = draft.pending.nonvocal = null;
         ['vocal', 'nonvocal', 'ass', 'srt'].forEach(k => {
           draft.pending.companions[k] = { path: null, exists: false };
         });
@@ -808,18 +797,13 @@
         .then(d => {
           if (d.ok) {
             update(draft => {
-              // Freeze pending → active
               draft.active.playing   = true;
               draft.active.videoPath = draft.pending.video;
               draft.active.dualStem  = !!(draft.pending.vocal && draft.pending.nonvocal);
-              draft.active.companions.ass = { ...draft.pending.companions.ass };
-              draft.active.companions.srt = { ...draft.pending.companions.srt };
-              draft.active.subMode = draft.pending.subMode;
               // Reset per-song controls to defaults
-              draft.controls.vocalVolume   = DEFAULT_VOCAL_VOL_PCT;
-              draft.controls.pitch         = DEFAULT_PITCH_SEMITONES;
-              draft.controls.subDelay      = DEFAULT_SUB_DELAY_MS;
-              draft.controls.srtDelayCache = DEFAULT_SUB_DELAY_MS;
+              draft.controls.vocalVolume = DEFAULT_VOCAL_VOL_PCT;
+              draft.controls.pitch       = DEFAULT_PITCH_SEMITONES;
+              // subtitle state will be populated by the first /api/status poll
             });
             startPolling();
           }
@@ -845,31 +829,13 @@
 
   // ── Subtitle mode ──────────────────────────────────────
   function setSubMode(mode) {
-    update(draft => {
-      // Cache SRT delay when leaving SRT; restore it when returning
-      if (draft.active.subMode === 'srt' && mode !== 'srt') {
-        draft.controls.srtDelayCache = draft.controls.subDelay;
-        draft.controls.subDelay = 0;
-      } else if (mode === 'srt' && draft.active.subMode !== 'srt') {
-        draft.controls.subDelay = draft.controls.srtDelayCache;
-      }
-      draft.active.subMode = mode;
-    });
-
-    const path = mode === 'karaoke' ? S.active.companions.ass?.path
-               : mode === 'srt'     ? S.active.companions.srt?.path
-               : null;
-
-    fetch('/api/sub_mode', {
+    const myId = ++S.subtitleMutation.id;
+    update(draft => { draft.active.subtitle.mode = mode; });
+    fetch('/api/subtitle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subtitle_path: path }),
-    });
-    fetch('/api/sub_delay', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ delay: S.controls.subDelay / 1000 }),
-    });
+      body: JSON.stringify({ mode }),
+    }).finally(() => { S.subtitleMutation.committed = myId; });
   }
 
   // ── Seek bar ───────────────────────────────────────────
@@ -942,28 +908,38 @@
   const subDelaySlider = document.getElementById('subDelaySlider');
   subDelaySlider.addEventListener('input', () => {
     S.locks.subDelay = true;
-    update(draft => { draft.controls.subDelay = parseInt(subDelaySlider.value); });
+    const s = parseInt(subDelaySlider.value) / 1000;
+    update(draft => { draft.active.subtitle.srtDelay = s; });
   });
   subDelaySlider.addEventListener('change', () => {
-    fetch('/api/sub_delay', {
+    const myId = ++S.subtitleMutation.id;
+    fetch('/api/subtitle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ delay: S.controls.subDelay / 1000 }),
-    }).finally(() => { S.locks.subDelay = false; });
+      body: JSON.stringify({ srt_delay: S.active.subtitle.srtDelay }),
+    }).finally(() => {
+      S.locks.subDelay = false;
+      S.subtitleMutation.committed = myId;
+    });
   });
 
   function stepSubDelay(deltaMs) {
     const min = parseInt(subDelaySlider.min);
     const max = parseInt(subDelaySlider.max);
-    const val = Math.max(min, Math.min(max, S.controls.subDelay + deltaMs));
+    const curMs = Math.round(S.active.subtitle.srtDelay * 1000);
+    const nextMs = Math.max(min, Math.min(max, curMs + deltaMs));
     S.locks.subDelay = true;
-    update(draft => { draft.controls.subDelay = val; });
+    update(draft => { draft.active.subtitle.srtDelay = nextMs / 1000; });
     debounce(() => {
-      fetch('/api/sub_delay', {
+      const myId = ++S.subtitleMutation.id;
+      fetch('/api/subtitle', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ delay: S.controls.subDelay / 1000 }),
-      }).finally(() => { S.locks.subDelay = false; });
+        body: JSON.stringify({ srt_delay: S.active.subtitle.srtDelay }),
+      }).finally(() => {
+        S.locks.subDelay = false;
+        S.subtitleMutation.committed = myId;
+      });
     }, 300, '_sub');
   }
 
@@ -1013,7 +989,12 @@
             // Sync controls from server only if user isn't dragging
             if (!S.locks.masterVol) draft.system.masterVolume  = d.master_volume ?? 100;
             if (!S.locks.vocalVol)  draft.controls.vocalVolume = Math.round(d.vocal_volume * 100);
-            if (!S.locks.subDelay)  draft.controls.subDelay    = Math.round(d.subtitle_delay * 1000);
+            // Subtitle: only sync when no in-flight mutation
+            if (S.subtitleMutation.id === S.subtitleMutation.committed) {
+              draft.active.subtitle.mode      = d.subtitle_mode;
+              draft.active.subtitle.available = d.subtitle_available;
+              if (!S.locks.subDelay) draft.active.subtitle.srtDelay = d.srt_delay;
+            }
           });
         });
     }, 500);
