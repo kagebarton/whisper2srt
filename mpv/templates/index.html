@@ -463,19 +463,67 @@
 </div>
 
 <script>
-  // ── State ──────────────────────────────────────────────
-  let files = {
-    video: document.getElementById('videoPath').value || null,
-    vocal: null,
-    nonvocal: null,
-    subtitle: null,
-  };
-  // Server-side defaults — used by resetUI so sliders reflect actual defaults
-  const DEFAULT_VOCAL_VOL_PCT = {{ default_vocal_vol_pct }};
-  const DEFAULT_SUB_DELAY_MS = {{ default_sub_delay_ms }};
+  // ── Constants (server-injected) ────────────────────────
+  const DEFAULT_VOCAL_VOL_PCT  = {{ default_vocal_vol_pct }};
+  const DEFAULT_SUB_DELAY_MS   = {{ default_sub_delay_ms }};
   const DEFAULT_PITCH_SEMITONES = {{ default_pitch_st }};
-  let playing = document.getElementById('playPauseBtn').textContent.includes('Pause');
-  let seeking = false;
+  const SEMITONE_LABELS = {
+    '-3': '−3 st', '-2': '−2 st', '-1': '−1 st', '0': '0 st',
+     '1': '+1 st',  '2': '+2 st',  '3': '+3 st',
+  };
+
+  // ── Single State Store ─────────────────────────────────
+  const S = {
+    // What the user has selected for the NEXT play
+    pending: {
+      video:    document.getElementById('videoPath').value || null,
+      vocal:    null,
+      nonvocal: null,
+      subtitle: null,
+      subMode:  'off',   // 'karaoke' | 'srt' | 'off'
+      companions: {
+        vocal:    { path: null, exists: false },
+        nonvocal: { path: null, exists: false },
+        ass:      { path: null, exists: false },
+        srt:      { path: null, exists: false },
+      },
+    },
+    // Snapshot of what is currently playing — frozen at /api/play success
+    active: {
+      playing:   document.getElementById('playPauseBtn').textContent.includes('Pause'),
+      videoPath: null,
+      dualStem:  false,
+      subMode:   'off',
+      companions: {
+        ass: { path: null, exists: false },
+        srt: { path: null, exists: false },
+      },
+    },
+    // Per-song controls — reset to defaults on every play
+    controls: {
+      vocalVolume:  DEFAULT_VOCAL_VOL_PCT,
+      pitch:        DEFAULT_PITCH_SEMITONES,
+      subDelay:     DEFAULT_SUB_DELAY_MS,
+      srtDelayCache: DEFAULT_SUB_DELAY_MS,
+    },
+    // System-wide — persists across songs
+    system: {
+      masterVolume: 100,
+    },
+    // Playback transport — updated by polling
+    transport: {
+      position: 0,
+      duration: 0,
+    },
+    // Interaction locks — render() skips slider updates while user is dragging
+    locks: {
+      seeking:   false,
+      vocalVol:  false,
+      subDelay:  false,
+      masterVol: false,
+    },
+  };
+
   let pollInterval = null;
 
   // ── Debounce helper (per-key) ──────────────────────────
@@ -485,66 +533,131 @@
     _debounceTimers[key] = setTimeout(() => { fn(); delete _debounceTimers[key]; }, delay);
   }
 
-  // Start polling if server is already playing when page loads
-  if (playing) startPolling();
-
-  // File browser state
-  let browseTarget = null;       // which field ('video' only now)
-  let browseSelected = null;     // currently selected file path in modal
-  let browseEntries = [];        // current directory entries
-
-  // ── Video field → send paths + update companions on change ──
-  document.getElementById('videoPath').addEventListener('change', () => {
-    const videoPath = document.getElementById('videoPath').value.trim() || null;
-    files.video = videoPath;
-    if (videoPath) updateCompanionFiles(videoPath);
-    else { clearCompanions(); sendFiles(); }
-  });
-
-  // Initialize companion files from pre-populated video path
-  if (files.video) updateCompanionFiles(files.video);
-  else {
-    // No video path pre-populated — hide vocal volume row
-    document.getElementById('vocalVolRow').style.display = 'none';
+  // ── Utilities ──────────────────────────────────────────
+  function fmtTime(s) {
+    if (!s || s <= 0) return '0:00';
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return `${m}:${sec.toString().padStart(2, '0')}`;
   }
 
+  function fmtDelay(ms) {
+    const s = ms / 1000;
+    return `${s >= 0 ? '+' : ''}${s.toFixed(1)}s`;
+  }
+
+  function basename(path) {
+    return path ? path.split('/').pop() : '';
+  }
+
+  // ── Reactive Render ────────────────────────────────────
+  // The single source of DOM truth. Idempotent — safe to call anywhere.
+  function render() {
+    const $ = id => document.getElementById(id);
+
+    // Transport
+    $('playPauseBtn').textContent = S.active.playing ? '⏸ Pause' : '▶ Play';
+
+    // Seek bar
+    if (!S.locks.seeking && S.transport.duration > 0) {
+      $('seekBar').value = (S.transport.position / S.transport.duration) * 100;
+    }
+    $('timeElapsed').textContent = fmtTime(S.transport.position);
+    $('timeTotal').textContent   = fmtTime(S.transport.duration);
+
+    // Vocal volume row — only visible when the ACTIVE song is dual-stem
+    $('vocalVolRow').style.display = S.active.dualStem ? '' : 'none';
+    if (!S.locks.vocalVol) {
+      $('vocalVol').value = S.controls.vocalVolume;
+      $('vocalVolVal').textContent = `${S.controls.vocalVolume}%`;
+    }
+
+    // Pitch
+    $('pitchSlider').value = S.controls.pitch;
+    $('pitchVal').textContent = SEMITONE_LABELS[String(S.controls.pitch)]
+      || `${S.controls.pitch > 0 ? '+' : ''}${S.controls.pitch} st`;
+
+    // Master volume
+    if (!S.locks.masterVol) {
+      $('masterVol').value = S.system.masterVolume;
+      $('masterVolVal').textContent = `${S.system.masterVolume}%`;
+    }
+
+    // Subtitle mode buttons — keyed off ACTIVE companions
+    const activeAss = S.active.companions.ass;
+    const activeSrt = S.active.companions.srt;
+    $('subBtnKaraoke').disabled = !activeAss?.exists;
+    $('subBtnSrt').disabled     = !activeSrt?.exists;
+    ['karaoke', 'srt', 'off'].forEach(m => {
+      const key = m.charAt(0).toUpperCase() + m.slice(1);
+      $('subBtn' + key).classList.toggle('active', m === S.active.subMode);
+    });
+
+    // Sub delay row — only visible in SRT mode
+    $('subDelayRow').style.display = S.active.subMode === 'srt' ? '' : 'none';
+    if (!S.locks.subDelay) {
+      $('subDelaySlider').value = S.controls.subDelay;
+      $('subDelayVal').textContent = fmtDelay(S.controls.subDelay);
+    }
+
+    // Companion checkboxes — always reflect PENDING selection
+    const c = S.pending.companions;
+    $('chkVocal').checked        = c.vocal.exists;
+    $('lblVocal').textContent    = c.vocal.exists    ? basename(c.vocal.path)    : '—';
+    $('chkNonvocal').checked     = c.nonvocal.exists;
+    $('lblNonvocal').textContent = c.nonvocal.exists ? basename(c.nonvocal.path) : '—';
+    $('chkAss').checked          = c.ass.exists;
+    $('lblAss').textContent      = c.ass.exists      ? basename(c.ass.path)      : '—';
+    $('chkSrt').checked          = c.srt.exists;
+    $('lblSrt').textContent      = c.srt.exists      ? basename(c.srt.path)      : '—';
+  }
+
+  // Mutate S then re-render. Every state change goes through here.
+  function update(mutator) {
+    if (mutator) mutator(S);
+    render();
+  }
+
+  // ── State Reset ────────────────────────────────────────
+  // Resets active + controls + transport. Does NOT touch pending or system.
+  function resetState(draft) {
+    draft.active.playing   = false;
+    draft.active.videoPath = null;
+    draft.active.dualStem  = false;
+    draft.active.subMode   = 'off';
+    draft.active.companions = {
+      ass: { path: null, exists: false },
+      srt: { path: null, exists: false },
+    };
+    draft.controls.vocalVolume   = DEFAULT_VOCAL_VOL_PCT;
+    draft.controls.pitch         = DEFAULT_PITCH_SEMITONES;
+    draft.controls.subDelay      = DEFAULT_SUB_DELAY_MS;
+    draft.controls.srtDelayCache = DEFAULT_SUB_DELAY_MS;
+    draft.transport.position = 0;
+    draft.transport.duration = 0;
+  }
+
+  // ── Initialization ─────────────────────────────────────
+  if (S.active.playing) startPolling();
+  if (S.pending.video) updateCompanionFiles(S.pending.video);
+  else render();   // render once so vocalVolRow is hidden, etc.
+
+  // Fetch master volume on load
+  fetch('/api/status').then(r => r.json()).then(d => {
+    update(draft => { draft.system.masterVolume = d.master_volume ?? 100; });
+  });
+
+  // ── File API ───────────────────────────────────────────
   function sendFiles() {
     fetch('/api/files', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(files),
-    });
-  }
-
-  // ── Companion files auto-populate ──────────────────────
-  function clearCompanions() {
-    ['Vocal','Nonvocal','Ass','Srt'].forEach(id => {
-      document.getElementById('chk' + id).checked = false;
-      document.getElementById('lbl' + id).textContent = '—';
-    });
-    files.vocal = files.nonvocal = files.subtitle = null;
-  }
-
-  // Pending subtitle data for the file selected in the browser (next play).
-  // Gets overwritten every time the user clicks a file in the browser.
-  let _assData = null;
-  let _srtData = null;
-  // Active subtitle data for the currently-playing song. Captured from pending
-  // when /api/play succeeds; used by the subtitle-mode buttons and _updateSubModeUI
-  // so that selecting a new file in the browser cannot alter the UI state of the
-  // song still playing.
-  let _activeAssData = null;
-  let _activeSrtData = null;
-  let _srtDelay = 0;  // cached SRT subtitle delay (ms), reset when leaving SRT mode
-
-  // Helper: set subtitle delay on slider, label, and backend
-  function _applySubDelay(ms) {
-    subDelaySlider.value = ms;
-    document.getElementById('subDelayVal').textContent = fmtDelay(ms);
-    fetch('/api/sub_delay', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ delay: ms / 1000 }),
+      body: JSON.stringify({
+        video:    S.pending.video,
+        vocal:    S.pending.vocal,
+        nonvocal: S.pending.nonvocal,
+        subtitle: S.pending.subtitle,
+      }),
     });
   }
 
@@ -552,116 +665,56 @@
     fetch(`/api/derive_files?video=${encodeURIComponent(videoPath)}`)
       .then(r => r.json())
       .then(data => {
-        // Vocal
-        const vocal = data.vocal;
-        document.getElementById('chkVocal').checked = vocal.exists;
-        document.getElementById('lblVocal').textContent = vocal.exists ? basename(vocal.path) : '—';
-        files.vocal = vocal.exists ? vocal.path : null;
+        update(draft => {
+          // Only mutate pending — active is untouched
+          draft.pending.companions.vocal    = data.vocal;
+          draft.pending.companions.nonvocal = data.nonvocal;
+          draft.pending.companions.ass      = data.ass;
+          draft.pending.companions.srt      = data.srt;
 
-        // Non-vocal
-        const nonvocal = data.nonvocal;
-        document.getElementById('chkNonvocal').checked = nonvocal.exists;
-        document.getElementById('lblNonvocal').textContent = nonvocal.exists ? basename(nonvocal.path) : '—';
-        files.nonvocal = nonvocal.exists ? nonvocal.path : null;
+          draft.pending.vocal    = data.vocal.exists    ? data.vocal.path    : null;
+          draft.pending.nonvocal = data.nonvocal.exists ? data.nonvocal.path : null;
 
-        // Vocal volume row visibility is NOT updated here — would leak the
-        // pending file's state into the currently playing song. It's updated
-        // on /api/play success, when pending becomes active.
-
-        // Cache subtitle data
-        _assData = data.ass;
-        document.getElementById('chkAss').checked = _assData.exists;
-        document.getElementById('lblAss').textContent = _assData.exists ? basename(_assData.path) : '—';
-
-        _srtData = data.srt;
-        document.getElementById('chkSrt').checked = _srtData.exists;
-        document.getElementById('lblSrt').textContent = _srtData.exists ? basename(_srtData.path) : '—';
-
-        // Update subtitle mode selector
-        updateSubControl(_assData, _srtData);
-
+          // Auto-select best subtitle mode for next play
+          draft.pending.subMode  = data.ass.exists ? 'karaoke'
+                                 : data.srt.exists ? 'srt'
+                                 : 'off';
+          draft.pending.subtitle = draft.pending.subMode === 'karaoke' ? data.ass.path
+                                 : draft.pending.subMode === 'srt'     ? data.srt.path
+                                 : null;
+        });
         sendFiles();
       });
   }
 
-  function updateSubControl(assData, srtData) {
-    // Cache the subtitle data for later use
-    if (assData) _assData = assData;
-    if (srtData) _srtData = srtData;
-
-    // Determine default: karaoke > srt > off
-    let defaultMode = 'off';
-    if (assData.exists) defaultMode = 'karaoke';
-    else if (srtData.exists) defaultMode = 'srt';
-
-    // Set files.subtitle for the next file — no UI changes here.
-    // All UI updates (button active state, disabled state, sub delay row)
-    // happen in _updateSubModeUI(), called only when /api/play succeeds.
-    _updateSubModeState(defaultMode);
-    sendFiles();
-  }
-
-  // Internal: just set files.subtitle based on mode
-  function _updateSubModeState(mode) {
-    files.subtitle = mode === 'karaoke' ? _assData?.path
-                   : mode === 'srt'     ? _srtData?.path
-                   : null;
-  }
-
-  // Update all subtitle UI to match the currently-playing (active) file.
-  // Reads from _activeAssData/_activeSrtData, NOT from pending _assData/_srtData,
-  // so selecting a new file in the browser cannot mutate the live UI state.
-  function _updateSubModeUI(mode) {
-    // Enable/disable buttons based on what the active song has available
-    document.getElementById('subBtnKaraoke').disabled = !_activeAssData?.exists;
-    document.getElementById('subBtnSrt').disabled     = !_activeSrtData?.exists;
-
-    ['karaoke','srt','off'].forEach(m => {
-      const key = m.charAt(0).toUpperCase() + m.slice(1);
-      document.getElementById('subBtn' + key)
-        .classList.toggle('active', m === mode);
-    });
-
-    // Show/hide sub delay
-    document.getElementById('subDelayRow').style.display = mode === 'srt' ? '' : 'none';
-
-    // Delay only applies to SRT mode; cache/restore so it never bleeds into ASS
-    if (mode === 'srt') {
-      _applySubDelay(_srtDelay);
+  // ── Video path input ───────────────────────────────────
+  document.getElementById('videoPath').addEventListener('change', () => {
+    const path = document.getElementById('videoPath').value.trim() || null;
+    update(draft => { draft.pending.video = path; });
+    if (path) {
+      updateCompanionFiles(path);
     } else {
-      _srtDelay = parseInt(subDelaySlider.value);
-      _applySubDelay(0);
+      update(draft => {
+        draft.pending.vocal = draft.pending.nonvocal = draft.pending.subtitle = null;
+        draft.pending.subMode = 'off';
+        ['vocal', 'nonvocal', 'ass', 'srt'].forEach(k => {
+          draft.pending.companions[k] = { path: null, exists: false };
+        });
+      });
+      sendFiles();
     }
-  }
-
-  // User clicked a subtitle mode button while a song is (or isn't) playing.
-  // Operates on _active* data — does NOT touch pending files.subtitle or call
-  // sendFiles(), so the browser's file pre-selection state stays intact.
-  function setSubMode(mode) {
-    _updateSubModeUI(mode);
-
-    const path = mode === 'karaoke' ? _activeAssData?.path
-               : mode === 'srt'     ? _activeSrtData?.path
-               : null;
-
-    fetch('/api/sub_mode', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ subtitle_path: path }),
-    });
-  }
-
-  function basename(path) {
-    return path.split('/').pop();
-  }
+  });
 
   // ── File browser modal ─────────────────────────────────
+  let browseTarget   = null;
+  let browseSelected = null;
+  let browseEntries  = [];
+
   function openBrowser(kind) {
-    browseTarget = kind;
+    browseTarget   = kind;
     browseSelected = null;
-    const currentPath = document.getElementById(kind + 'Path').value.trim();
-    // Start from the directory of the existing value, or home
-    const startDir = currentPath ? dirname(currentPath) : null;
+    const currentPath = S.pending.video || '';
+    const startDir    = currentPath ? dirname(currentPath) : null;
     document.getElementById('selectBtn').disabled = true;
     navigateTo(startDir || null);
     document.getElementById('fileModal').classList.add('open');
@@ -697,32 +750,27 @@
   function renderEntries(currentDir, parentPath) {
     const body = document.getElementById('modalBody');
     let html = '';
-
-    // Parent link
     if (parentPath !== null && parentPath !== undefined) {
       html += `<div class="entry" onclick="navigateTo('${escapeAttr(parentPath)}')">
         <span class="icon dir">⬆</span>
         <span class="name">..</span>
       </div>`;
     }
-
     browseEntries.forEach((entry, i) => {
-      const icon = entry.is_dir ? '📁' : '📄';
+      const icon      = entry.is_dir ? '📁' : '📄';
       const iconClass = entry.is_dir ? 'icon dir' : 'icon';
-      const clickHandler = entry.is_dir
+      const click     = entry.is_dir
         ? `onclick="navigateTo('${escapeAttr(entry.path)}')"`
         : `onclick="selectFile('${escapeAttr(entry.path)}', this)"`;
-      html += `<div class="entry" data-idx="${i}" ${clickHandler}>
+      html += `<div class="entry" data-idx="${i}" ${click}>
         <span class="${iconClass}">${icon}</span>
         <span class="name">${escapeHtml(entry.name)}</span>
       </div>`;
     });
-
     body.innerHTML = html;
   }
 
   function selectFile(path, el) {
-    // Deselect previous
     document.querySelectorAll('.modal-body .entry.selected').forEach(e => e.classList.remove('selected'));
     el.classList.add('selected');
     browseSelected = path;
@@ -732,7 +780,7 @@
   function confirmSelection() {
     if (browseSelected && browseTarget === 'video') {
       document.getElementById('videoPath').value = browseSelected;
-      files.video = browseSelected;
+      update(draft => { draft.pending.video = browseSelected; });
       updateCompanionFiles(browseSelected);
     }
     closeModal();
@@ -745,47 +793,34 @@
     return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
   }
 
-  // Close modal on overlay click
   document.getElementById('fileModal').addEventListener('click', e => {
     if (e.target.id === 'fileModal') closeModal();
   });
-
-  // Close modal on Escape
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') closeModal();
   });
 
   // ── Transport ──────────────────────────────────────────
   function togglePlayPause() {
-    if (!playing) {
+    if (!S.active.playing) {
       fetch('/api/play', { method: 'POST' })
         .then(r => r.json())
         .then(d => {
           if (d.ok) {
-            playing = true;
-            document.getElementById('playPauseBtn').textContent = '⏸ Pause';
-
-            // Vocal volume row reflects the now-playing song's dual-stem
-            // status (pending just became active).
-            document.getElementById('vocalVolRow').style.display =
-              (files.vocal && files.nonvocal) ? '' : 'none';
-
-            // Reset all per-song controls (vocal volume, pitch, sub delay)
-            // to defaults. Backend already called reset_state_defaults() at
-            // the start of /api/play, so no extra API calls are needed —
-            // just sync the UI sliders to the matching defaults.
-            _resetSongControls();
-
-            // Capture pending subtitle data as "active" for the now-playing
-            // song. From this point on, _updateSubModeUI and setSubMode read
-            // from _active* — selecting a new file in the browser updates
-            // pending _assData/_srtData but leaves active alone.
-            _activeAssData = _assData;
-            _activeSrtData = _srtData;
-            let mode = 'off';
-            if (_activeAssData?.exists) mode = 'karaoke';
-            else if (_activeSrtData?.exists) mode = 'srt';
-            _updateSubModeUI(mode);
+            update(draft => {
+              // Freeze pending → active
+              draft.active.playing   = true;
+              draft.active.videoPath = draft.pending.video;
+              draft.active.dualStem  = !!(draft.pending.vocal && draft.pending.nonvocal);
+              draft.active.companions.ass = { ...draft.pending.companions.ass };
+              draft.active.companions.srt = { ...draft.pending.companions.srt };
+              draft.active.subMode = draft.pending.subMode;
+              // Reset per-song controls to defaults
+              draft.controls.vocalVolume   = DEFAULT_VOCAL_VOL_PCT;
+              draft.controls.pitch         = DEFAULT_PITCH_SEMITONES;
+              draft.controls.subDelay      = DEFAULT_SUB_DELAY_MS;
+              draft.controls.srtDelayCache = DEFAULT_SUB_DELAY_MS;
+            });
             startPolling();
           }
         });
@@ -794,36 +829,11 @@
     }
   }
 
-  // Reset all per-song controls to their defaults. Called on both /api/play
-  // (entering a new song) and resetUI (stopping playback). Master volume is
-  // NOT reset — it's system-wide and persists across songs.
-  function _resetSongControls() {
-    vocalVol.value = DEFAULT_VOCAL_VOL_PCT;
-    document.getElementById('vocalVolVal').textContent = `${DEFAULT_VOCAL_VOL_PCT}%`;
-    pitchSlider.value = DEFAULT_PITCH_SEMITONES;
-    document.getElementById('pitchVal').textContent = SEMITONE_LABELS[String(DEFAULT_PITCH_SEMITONES)] || `${DEFAULT_PITCH_SEMITONES > 0 ? '+' : ''}${DEFAULT_PITCH_SEMITONES} st`;
-    subDelaySlider.value = DEFAULT_SUB_DELAY_MS;
-    document.getElementById('subDelayVal').textContent = fmtDelay(DEFAULT_SUB_DELAY_MS);
-    _srtDelay = DEFAULT_SUB_DELAY_MS;
-  }
-
-  function resetUI() {
-    playing = false;
-    document.getElementById('playPauseBtn').textContent = '▶ Play';
-    document.getElementById('seekBar').value = 0;
-    document.getElementById('timeElapsed').textContent = '0:00';
-    document.getElementById('timeTotal').textContent = '0:00';
-    _resetSongControls();
-    // No song is active once playback stops; refresh subtitle UI so the
-    // karaoke/srt buttons return to a neutral state.
-    _activeAssData = null;
-    _activeSrtData = null;
-    _updateSubModeUI('off');
-    stopPolling();
-  }
-
   function stopPlayback() {
-    fetch('/api/stop', { method: 'POST' }).then(() => resetUI());
+    fetch('/api/stop', { method: 'POST' }).then(() => {
+      stopPolling();
+      update(draft => resetState(draft));
+    });
   }
 
   function exitApp() {
@@ -833,200 +843,178 @@
     });
   }
 
+  // ── Subtitle mode ──────────────────────────────────────
+  function setSubMode(mode) {
+    update(draft => {
+      // Cache SRT delay when leaving SRT; restore it when returning
+      if (draft.active.subMode === 'srt' && mode !== 'srt') {
+        draft.controls.srtDelayCache = draft.controls.subDelay;
+        draft.controls.subDelay = 0;
+      } else if (mode === 'srt' && draft.active.subMode !== 'srt') {
+        draft.controls.subDelay = draft.controls.srtDelayCache;
+      }
+      draft.active.subMode = mode;
+    });
+
+    const path = mode === 'karaoke' ? S.active.companions.ass?.path
+               : mode === 'srt'     ? S.active.companions.srt?.path
+               : null;
+
+    fetch('/api/sub_mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subtitle_path: path }),
+    });
+    fetch('/api/sub_delay', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delay: S.controls.subDelay / 1000 }),
+    });
+  }
+
   // ── Seek bar ───────────────────────────────────────────
   const seekBar = document.getElementById('seekBar');
-  seekBar.addEventListener('input', () => { seeking = true; });
+  seekBar.addEventListener('input', () => { S.locks.seeking = true; });
   seekBar.addEventListener('change', () => {
-    const pos = (seekBar.value / 100) * (state.duration || 0);
+    const pos = (seekBar.value / 100) * (S.transport.duration || 0);
     fetch('/api/seek', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ position: pos }),
-    }).finally(() => { seeking = false; });
+    }).finally(() => { S.locks.seeking = false; });
   });
 
   // ── Vocal volume ───────────────────────────────────────
   const vocalVol = document.getElementById('vocalVol');
-  let adjustingVocalVol = false;
   vocalVol.addEventListener('input', () => {
-    adjustingVocalVol = true;
-    document.getElementById('vocalVolVal').textContent = `${vocalVol.value}%`;
+    S.locks.vocalVol = true;
+    update(draft => { draft.controls.vocalVolume = parseInt(vocalVol.value); });
   });
   vocalVol.addEventListener('change', () => {
     fetch('/api/volume', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ volume: parseInt(vocalVol.value) }),
-    }).finally(() => { adjustingVocalVol = false; });
+      body: JSON.stringify({ volume: S.controls.vocalVolume }),
+    }).finally(() => { S.locks.vocalVol = false; });
   });
 
   function stepVolume(delta) {
-    const min = parseInt(vocalVol.min);
-    const max = parseInt(vocalVol.max);
-    let val = Math.max(min, Math.min(max, parseInt(vocalVol.value) + delta));
-    vocalVol.value = val;
-    document.getElementById('vocalVolVal').textContent = `${val}%`;
-    adjustingVocalVol = true;
+    const val = Math.max(0, Math.min(100, S.controls.vocalVolume + delta));
+    S.locks.vocalVol = true;
+    update(draft => { draft.controls.vocalVolume = val; });
     debounce(() => {
       fetch('/api/volume', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ volume: parseInt(vocalVol.value) }),
-      }).finally(() => { adjustingVocalVol = false; });
+        body: JSON.stringify({ volume: S.controls.vocalVolume }),
+      }).finally(() => { S.locks.vocalVol = false; });
     }, 300, '_vol');
-  }
-
-  function syncVocalVol(pct) {
-    if (!adjustingVocalVol) {
-      vocalVol.value = pct;
-      document.getElementById('vocalVolVal').textContent = `${pct}%`;
-    }
   }
 
   // ── Pitch ──────────────────────────────────────────────
   const pitchSlider = document.getElementById('pitchSlider');
-  const SEMITONE_LABELS = {
-    '-3': '−3 st', '-2': '−2 st', '-1': '−1 st',  '0': '0 st',
-     '1': '+1 st',  '2': '+2 st',  '3': '+3 st',
-  };
   pitchSlider.addEventListener('input', () => {
-    const st = parseInt(pitchSlider.value);
-    document.getElementById('pitchVal').textContent = SEMITONE_LABELS[String(st)] || `${st > 0 ? '+' : ''}${st} st`;
+    update(draft => { draft.controls.pitch = parseInt(pitchSlider.value); });
   });
   pitchSlider.addEventListener('change', () => {
-    const st = parseInt(pitchSlider.value);
     fetch('/api/pitch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ semitones: st }),
+      body: JSON.stringify({ semitones: S.controls.pitch }),
     });
   });
 
   function stepPitch(delta) {
     const min = parseInt(pitchSlider.min);
     const max = parseInt(pitchSlider.max);
-    let val = Math.max(min, Math.min(max, parseInt(pitchSlider.value) + delta));
-    pitchSlider.value = val;
-    document.getElementById('pitchVal').textContent = SEMITONE_LABELS[String(val)] || `${val > 0 ? '+' : ''}${val} st`;
+    const val = Math.max(min, Math.min(max, S.controls.pitch + delta));
+    update(draft => { draft.controls.pitch = val; });
     debounce(() => {
       fetch('/api/pitch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ semitones: parseInt(pitchSlider.value) }),
+        body: JSON.stringify({ semitones: S.controls.pitch }),
       });
     }, 300, '_pitch');
   }
 
   // ── Subtitle delay ─────────────────────────────────────
   const subDelaySlider = document.getElementById('subDelaySlider');
-  let adjustingSubDelay = false;
-  function fmtDelay(ms) {
-    const s = ms / 1000;
-    return `${s >= 0 ? '+' : ''}${s.toFixed(1)}s`;
-  }
   subDelaySlider.addEventListener('input', () => {
-    adjustingSubDelay = true;
-    document.getElementById('subDelayVal').textContent = fmtDelay(parseInt(subDelaySlider.value));
+    S.locks.subDelay = true;
+    update(draft => { draft.controls.subDelay = parseInt(subDelaySlider.value); });
   });
   subDelaySlider.addEventListener('change', () => {
-    const ms = parseInt(subDelaySlider.value);
-    _srtDelay = ms;
     fetch('/api/sub_delay', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ delay: ms / 1000 }),
-    }).finally(() => { adjustingSubDelay = false; });
+      body: JSON.stringify({ delay: S.controls.subDelay / 1000 }),
+    }).finally(() => { S.locks.subDelay = false; });
   });
 
   function stepSubDelay(deltaMs) {
     const min = parseInt(subDelaySlider.min);
     const max = parseInt(subDelaySlider.max);
-    let val = Math.max(min, Math.min(max, parseInt(subDelaySlider.value) + deltaMs));
-    subDelaySlider.value = val;
-    document.getElementById('subDelayVal').textContent = fmtDelay(val);
-    _srtDelay = val;
-    adjustingSubDelay = true;
+    const val = Math.max(min, Math.min(max, S.controls.subDelay + deltaMs));
+    S.locks.subDelay = true;
+    update(draft => { draft.controls.subDelay = val; });
     debounce(() => {
       fetch('/api/sub_delay', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ delay: parseInt(subDelaySlider.value) / 1000 }),
-      }).finally(() => { adjustingSubDelay = false; });
+        body: JSON.stringify({ delay: S.controls.subDelay / 1000 }),
+      }).finally(() => { S.locks.subDelay = false; });
     }, 300, '_sub');
-  }
-
-  function syncSubDelay(ms) {
-    if (!adjustingSubDelay) {
-      subDelaySlider.value = ms;
-      document.getElementById('subDelayVal').textContent = fmtDelay(ms);
-      _srtDelay = ms;
-    }
   }
 
   // ── Master volume ──────────────────────────────────────
   const masterVol = document.getElementById('masterVol');
-  let adjustingMasterVol = false;
   masterVol.addEventListener('input', () => {
-    adjustingMasterVol = true;
-    document.getElementById('masterVolVal').textContent = `${masterVol.value}%`;
+    S.locks.masterVol = true;
+    update(draft => { draft.system.masterVolume = parseInt(masterVol.value); });
   });
   masterVol.addEventListener('change', () => {
     fetch('/api/master_volume', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ volume: parseInt(masterVol.value) }),
-    }).finally(() => { adjustingMasterVol = false; });
+      body: JSON.stringify({ volume: S.system.masterVolume }),
+    }).finally(() => { S.locks.masterVol = false; });
   });
 
   function stepMasterVolume(delta) {
-    const min = parseInt(masterVol.min);
-    const max = parseInt(masterVol.max);
-    let val = Math.max(min, Math.min(max, parseInt(masterVol.value) + delta));
-    masterVol.value = val;
-    document.getElementById('masterVolVal').textContent = `${val}%`;
-    adjustingMasterVol = true;
+    const val = Math.max(0, Math.min(100, S.system.masterVolume + delta));
+    S.locks.masterVol = true;
+    update(draft => { draft.system.masterVolume = val; });
     debounce(() => {
       fetch('/api/master_volume', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ volume: parseInt(masterVol.value) }),
-      }).finally(() => { adjustingMasterVol = false; });
+        body: JSON.stringify({ volume: S.system.masterVolume }),
+      }).finally(() => { S.locks.masterVol = false; });
     }, 300, '_mvol');
   }
 
-  // ── Polling for position ───────────────────────────────
-  let state = { position: 0, duration: 0 };
-
-  function syncMasterVol(pct) {
-    if (!adjustingMasterVol) {
-      masterVol.value = pct;
-      document.getElementById('masterVolVal').textContent = `${pct}%`;
-    }
-  }
-
-  // Initialize master volume on page load
-  fetch('/api/status').then(r => r.json()).then(d => syncMasterVol(d.master_volume ?? 100));
-
+  // ── Polling ────────────────────────────────────────────
   function startPolling() {
     if (pollInterval) return;
     pollInterval = setInterval(() => {
       fetch('/api/status')
         .then(r => r.json())
         .then(d => {
-          if (playing && !d.playing) {
-            resetUI();
-            return;
-          }
-          state.position = d.position || 0;
-          state.duration = d.duration || 0;
-          if (!seeking && state.duration > 0) {
-            seekBar.value = (state.position / state.duration) * 100;
-          }
-          document.getElementById('timeElapsed').textContent = fmtTime(state.position);
-          document.getElementById('timeTotal').textContent = fmtTime(state.duration);
-          syncMasterVol(d.master_volume ?? 100);
-          syncVocalVol(Math.round(d.vocal_volume * 100));
-          syncSubDelay(Math.round(d.subtitle_delay * 1000));
+          update(draft => {
+            if (draft.active.playing && !d.playing) {
+              // Server says stopped (natural song end)
+              resetState(draft);
+              stopPolling();
+              return;
+            }
+            draft.transport.position = d.position || 0;
+            draft.transport.duration = d.duration || 0;
+            // Sync controls from server only if user isn't dragging
+            if (!S.locks.masterVol) draft.system.masterVolume  = d.master_volume ?? 100;
+            if (!S.locks.vocalVol)  draft.controls.vocalVolume = Math.round(d.vocal_volume * 100);
+            if (!S.locks.subDelay)  draft.controls.subDelay    = Math.round(d.subtitle_delay * 1000);
+          });
         });
     }, 500);
   }
@@ -1036,20 +1024,14 @@
     pollInterval = null;
   }
 
-  function fmtTime(s) {
-    if (!s || s <= 0) return '0:00';
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${sec.toString().padStart(2, '0')}`;
-  }
-
-  // Prevent touch scroll/zoom cancelling step button taps
+  // ── Touch step buttons ─────────────────────────────────
   document.querySelectorAll('.step-btn').forEach(btn => {
     btn.addEventListener('touchend', e => {
       e.preventDefault();
       btn.click();
     }, { passive: false });
   });
+
 </script>
 </body>
 </html>
