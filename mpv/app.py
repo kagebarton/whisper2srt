@@ -11,7 +11,6 @@ from pathlib import Path
 import qrcode
 from PIL import Image, ImageFont
 from flask import Flask, render_template, request, jsonify
-import zmq
 
 from mpv_controller import MpvController
 
@@ -62,6 +61,19 @@ OSD_CLOCK      = 5   # Clock, bottom-left
 
 # ── State ──────────────────────────────────────────────────────────────────────
 NONVOCAL_VOL = 1.0  # fixed
+
+# ── Rubberband filter params ────────────────────────────────────────────────────
+# Shared base; nonvocal overrides detector/window/formant/channels for percussion.
+_RB_VOCAL = (
+    "pitchq=quality:transients=crisp:detector=compound"
+    ":phase=laminar:window=long:formant=preserved"
+    ":channels=together:smoothing=off"
+)
+_RB_NONVOCAL = (
+    "pitchq=quality:transients=crisp:detector=percussive"
+    ":phase=laminar:window=short:formant=shifted"
+    ":channels=apart:smoothing=off"
+)
 QR_CODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qrcode.png")
 PLACEHOLDER_PNG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "placeholder.png")
 LOGO_JPG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.jpg")
@@ -133,57 +145,25 @@ def build_filter(vocal_vol, pitch, dual_stem):
     norm_vol = f"{NORMALIZATION_DB}dB" if NORMALIZATION_ENABLED else None
 
     if dual_stem:
-        # ZMQ bind allows live volume changes without filter rebuild (Phase 4
-        # gate: once af_command is verified to reach lavfi-complex filters,
-        # remove the azmq clause here and replace the ZMQ block in /api/volume
-        # with: controller.af_command("vocalvol", "volume", str(vocal_volume)))
-        zmq_bind = ",azmq=bind_address=tcp\\\\://127.0.0.1\\\\:5556"
-        if norm_vol:
-            amix_out = f'[vocal][nonvocal]amix=inputs=2:normalize=0[mixed];[mixed]volume={norm_vol}[ao]'
-        else:
-            amix_out = f'[vocal][nonvocal]amix=inputs=2:normalize=0[ao]'
+        amix_out = (
+            f'[vocal][nonvocal]amix=inputs=2:normalize=0[mixed];[mixed]volume={norm_vol}[ao]'
+            if norm_vol else
+            '[vocal][nonvocal]amix=inputs=2:normalize=0[ao]'
+        )
         return (
-            f'[aid2]volume@vocalvol={vocal_vol}{zmq_bind},'
-            f'rubberband@vocalrb=pitch={pitch}'
-            f':pitchq=quality'
-            f':transients=crisp'
-            f':detector=compound'
-            f':phase=laminar'
-            f':window=long'
-            f':formant=preserved'
-            f':channels=together'
-            f':smoothing=off'
-            f'[vocal];'
-            f'[aid3]volume@nonvocalvol={NONVOCAL_VOL},'
-            f'rubberband@nonvocalrb=pitch={pitch}'
-            f':pitchq=quality'
-            f':transients=crisp'
-            f':detector=percussive'
-            f':phase=laminar'
-            f':window=short'
-            f':formant=shifted'
-            f':channels=apart'
-            f':smoothing=off'
-            f'[nonvocal];'
+            f'[aid2]volume@vocalvol={vocal_vol}'
+            f',azmq=bind_address=tcp\\\\://127.0.0.1\\\\:5556'
+            f',rubberband@vocalrb=pitch={pitch}:{_RB_VOCAL}[vocal];'
+            f'[aid3]volume@nonvocalvol={NONVOCAL_VOL}'
+            f',rubberband@nonvocalrb=pitch={pitch}:{_RB_NONVOCAL}[nonvocal];'
             f'{amix_out}'
         )
     else:
         if norm_vol:
-            stem = f'[aid1]volume={norm_vol}[pre];[pre]rubberband@rb=pitch={pitch}'
+            stem = f'[aid1]volume={norm_vol}[pre];[pre]rubberband@rb=pitch={pitch}:{_RB_VOCAL}'
         else:
-            stem = f'[aid1]rubberband@rb=pitch={pitch}'
-        rest = (
-            f':pitchq=quality'
-            f':transients=crisp'
-            f':detector=compound'
-            f':phase=laminar'
-            f':window=long'
-            f':formant=preserved'
-            f':channels=together'
-            f':smoothing=off'
-            f'[ao]'
-        )
-        return stem + rest
+            stem = f'[aid1]rubberband@rb=pitch={pitch}:{_RB_VOCAL}'
+        return stem + '[ao]'
 
 
 def apply_srt_style():
@@ -566,20 +546,7 @@ def set_volume():
     vol_pct = request.json.get("volume", 100)
     state["vocal_volume"] = float(vol_pct) / 100.0
     if state["playing"] and state["dual_stem"]:
-        # Phase 4 gate: once controller.af_command("vocalvol", "volume", ...)
-        # is verified to reach lavfi-complex filters without a rebuild blip,
-        # replace this ZMQ block with:
-        #   controller.af_command("vocalvol", "volume", str(state["vocal_volume"]))
-        # and remove the azmq= clause from build_filter().
-        try:
-            ctx = zmq.Context()
-            sock = ctx.socket(zmq.REQ)
-            sock.setsockopt(zmq.RCVTIMEO, 2000)
-            sock.connect("tcp://127.0.0.1:5556")
-            sock.send_string(f"volume@vocalvol volume {state['vocal_volume']}")
-            sock.recv()
-        except zmq.ZMQError:
-            pass
+        controller.zmq_af_command("volume@vocalvol", "volume", str(state["vocal_volume"]))
     send_timecode_overlay()
     return jsonify({"ok": True})
 

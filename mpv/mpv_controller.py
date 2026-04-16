@@ -13,6 +13,9 @@ import time
 import logging
 
 import mpv
+import zmq as _zmq
+
+_zmq_ctx = _zmq.Context()
 
 log = logging.getLogger(__name__)
 
@@ -275,10 +278,25 @@ class MpvController:
     def af_command(self, label: str, cmd: str, argument: str) -> None:
         """Issue a live af-command to a named filter label.
 
-        Phase 4 gate: verify this reaches filters inside lavfi-complex before
-        removing the ZMQ volume path.  If confirmed, call as:
-          controller.af_command("vocalvol", "volume", str(vocal_volume))
-        and remove the azmq= clause from build_filter() + the ZMQ block in
-        /api/volume.
+        Note: af_command does NOT reach filters inside lavfi-complex.
+        Use zmq_af_command() for those.
         """
         self._player.af_command(label, cmd, argument)
+
+    def zmq_af_command(self, label: str, cmd: str, value: str,
+                       address: str = "tcp://127.0.0.1:5556") -> None:
+        """Send a live parameter change to a lavfi-complex filter via ZMQ.
+
+        A fresh socket is created per call so a receive timeout never leaves
+        the REQ socket in a stuck state. The context is module-level and reused.
+        """
+        sock = _zmq_ctx.socket(_zmq.REQ)
+        try:
+            sock.setsockopt(_zmq.RCVTIMEO, 2000)
+            sock.connect(address)
+            sock.send_string(f"{label} {cmd} {value}")
+            sock.recv()
+        except _zmq.ZMQError:
+            pass
+        finally:
+            sock.close()
