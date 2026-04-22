@@ -1,4 +1,6 @@
 stable-ts
 faster-whisper
 lyricsgenius
+srt
+audio-separator
 #torch
