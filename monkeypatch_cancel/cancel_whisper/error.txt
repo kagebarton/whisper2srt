@@ -1,0 +1,77 @@
+(pik) ken@kenskaraoke:~/whisper2srt/cancel_whisper$ python test_cancel_whisper.py ../song/Free---vocal.m4a ../song/Free.txt --cancel-after 3
+[20:13:59] INFO: ======================================================================
+[20:13:59] INFO: STEP 1: Loading whisper model
+[20:13:59] INFO: ======================================================================
+[20:14:00] INFO: Loading whisper model: /home/ken/whisper2srt/whisper-model/medium
+[20:14:03] INFO: Whisper model loaded in 2.5s
+[20:14:03] INFO: Model loaded in 3.7s
+[20:14:03] INFO: 
+[20:14:03] INFO: ======================================================================
+[20:14:03] INFO: STEP 2: Running alignment (will cancel after 3.0s)
+[20:14:03] INFO: ======================================================================
+Align:  59%|███████████████▊           | 112.64/191.99 [00:02<00:01, 41.26sec/s][20:14:06] INFO: Cancel detected before encode pass #5 — aborting
+Align:  59%|███████████████▊           | 112.64/191.99 [00:02<00:01, 41.04sec/s]
+[20:14:06] INFO: Alignment cancelled after 4 encode passes — model still loaded
+[20:14:06] INFO: ✓ Alignment cancelled after 3.4s (as expected)
+[20:14:06] INFO:   Alignment cancelled after 4 encode passes (model still loaded)
+[20:14:06] INFO: 
+[20:14:06] INFO: ======================================================================
+[20:14:06] INFO: STEP 3: Verify model is still loaded after cancellation
+[20:14:06] INFO: ======================================================================
+[20:14:06] INFO: Model is still loaded: True
+[20:14:06] INFO: ✓ Model survived cancellation — no reload needed
+[20:14:06] INFO: 
+[20:14:06] INFO: ======================================================================
+[20:14:06] INFO: STEP 4: Re-running alignment (model should still be loaded)
+[20:14:06] INFO: ======================================================================
+Align: 100%|███████████████████████████| 191.99/191.99 [00:03<00:00, 55.56sec/s]
+Adjustment: 100%|███████████████████| 180.74/180.74 [00:00<00:00, 38119.30sec/s]
+/home/ken/miniconda3/envs/pik/lib/python3.11/site-packages/stable_whisper/alignment.py:211: UserWarning: 3/49 segments failed to align.
+  result = aligner.align(audio, text)
+[20:14:10] INFO: ✓ Second alignment completed in 4.0s
+[20:14:10] INFO:   Segments: 49
+[20:14:10] INFO:   Words: 380
+[20:14:10] INFO: 
+[20:14:10] INFO: ======================================================================
+[20:14:10] INFO: STEP 5: Running refinement (will cancel after 3.0s)
+[20:14:10] INFO: ======================================================================
+Refine:  38%|██████████▎                | 73.21/192.01 [00:02<00:03, 29.91sec/s][20:14:13] INFO: Cancel detected before refine pass #13 — aborting
+Refine:  38%|██████████▎                | 73.21/192.01 [00:02<00:04, 28.95sec/s]
+[20:14:13] INFO: Refinement cancelled after 12 encode passes — model still loaded
+[20:14:13] INFO: ✓ Refinement cancelled after 3.0s (as expected)
+[20:14:13] INFO:   Refinement cancelled after 12 encode passes (model still loaded)
+[20:14:13] INFO: 
+[20:14:13] INFO: ======================================================================
+[20:14:13] INFO: STEP 6: Re-running refinement (model should still be loaded)
+[20:14:13] INFO: ======================================================================
+Align: 100%|███████████████████████████| 191.99/191.99 [00:03<00:00, 55.25sec/s]
+[aost#0:0/pcm_s16le @ 0x576fde7aa1c0] Error submitting a packet to the muxer: Broken pipe
+[out#0/s16le @ 0x576fde78b100] Error muxing a packet
+[out#0/s16le @ 0x576fde78b100] Error writing trailer: Broken pipe
+[out#0/s16le @ 0x576fde78b100] Error closing file: Broken pipe
+Adjustment: 100%|███████████████████| 180.74/180.74 [00:00<00:00, 35189.09sec/s]
+/home/ken/miniconda3/envs/pik/lib/python3.11/site-packages/stable_whisper/alignment.py:211: UserWarning: 3/49 segments failed to align.
+  result = aligner.align(audio, text)
+Refine: 100%|██████████████████████████| 192.01/192.01 [00:05<00:00, 35.00sec/s]
+[20:14:23] INFO: ✓ Second alignment+refine completed in 9.9s
+[20:14:23] INFO: 
+[20:14:23] INFO: ======================================================================
+[20:14:23] INFO: SUMMARY
+[20:14:23] INFO: ======================================================================
+[20:14:23] INFO:   Model load: 3.7s
+[20:14:23] INFO:   Cancelled align + re-run: 4.0s (no model reload)
+[20:14:23] INFO:   Cancelled refine + re-run: 9.9s (no model reload)
+[20:14:23] INFO: 
+[20:14:23] INFO: ✓✓✓ MODEL WAS STILL LOADED AFTER CANCELLATION — NO RELOAD NEEDED ✓✓✓
+[20:14:23] INFO: 
+[20:14:23] INFO: The monkey-patch on model.encode() allows cancellation between
+[20:14:23] INFO: encoder passes in both align() and refine(), while the CTranslate2
+[20:14:23] INFO: model weights survive as instance attributes on the WhisperModel.
+[aost#0:0/pcm_s16le @ 0x588d6c69e1c0] Error submitting a packet to the muxer: Broken pipe
+[out#0/s16le @ 0x588d6c67f100] Error muxing a packet
+[aost#0:0/pcm_s16le @ 0x59606c1481c0] Error submitting a packet to the muxer: Broken pipe
+[out#0/s16le @ 0x59606c129100] Error muxing a packet
+[out#0/s16le @ 0x588d6c67f100] Error writing trailer: Broken pipe
+[out#0/s16le @ 0x588d6c67f100] Error closing file: Broken pipe
+[out#0/s16le @ 0x59606c129100] Error writing trailer: Broken pipe
+[out#0/s16le @ 0x59606c129100] Error closing file: Broken pipe
