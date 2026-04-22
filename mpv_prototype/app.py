@@ -201,8 +201,8 @@ def reset_state_defaults():
     state["dual_stem"] = False
 
 
-def _apply_subtitle_mode(mode, *, skip_remove=False):
-    """Atomic: update state, remove current sub, add new, apply delay.
+def _apply_subtitle_mode(mode):
+    """Atomic: update state, deselect current sub, add new, apply delay.
     Invariant: sub_delay is 0.0 for any mode != 'srt'.
 
     Caller must ensure mpv has a video loaded. Does NOT gate on
@@ -210,19 +210,16 @@ def _apply_subtitle_mode(mode, *, skip_remove=False):
     to keep _on_idle_active from firing on_song_end during sub_add.
     /api/subtitle gates the call externally when nothing is playing.
 
-    Args:
-        skip_remove: When True, skip the sub_remove() call.  Used on
-            initial play where mpv may have auto-loaded a matching subtitle;
-            calling sub-remove on that auto-loaded track while lavfi-complex
-            is active triggers a libmpv segfault.  sub_add(..., "select")
-            alone correctly replaces the active subtitle without the crash.
+    Uses sid="no" to deselect the current track instead of sub-remove,
+    because sub-remove segfaults libmpv while lavfi-complex is active
+    (known libmpv bug affecting auto-loaded subtitle tracks).
+    sub_add(..., "select") then replaces the active subtitle safely.
     """
     state["subtitle_mode"] = mode
     path = None
-    if   mode == "karaoke": path = state["subtitle_available"]["ass"]
-    elif mode == "srt":     path = state["subtitle_available"]["srt"]
-    if not skip_remove:
-        controller.sub_remove()
+    if mode == "karaoke": path = state["subtitle_available"]["ass"]
+    elif mode == "srt": path = state["subtitle_available"]["srt"]
+    controller.set_sid("no")
     if path:
         controller.sub_add(path, "select")
         if mode == "srt":
@@ -493,7 +490,7 @@ def play():
     if   state["subtitle_available"]["ass"]: default_mode = "karaoke"
     elif state["subtitle_available"]["srt"]: default_mode = "srt"
     else:                                    default_mode = "off"
-    _apply_subtitle_mode(default_mode, skip_remove=True)
+    _apply_subtitle_mode(default_mode)
 
     # Set playing=True LAST so _on_idle_active cannot fire on_song_end
     # during any of the subtitle/audio setup above.
