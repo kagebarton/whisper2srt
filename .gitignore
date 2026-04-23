@@ -3,6 +3,7 @@ song/
 audio-separator/
 .qwen/
 whisper-model/
+pyann-models/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
