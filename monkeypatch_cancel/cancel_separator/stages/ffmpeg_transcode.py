@@ -8,8 +8,8 @@ import logging
 import subprocess
 from pathlib import Path
 
-from cancel_test.context import CancelledError, StageContext
-from cancel_test.stages.base import BaseStage
+from cancel_separator.context import CancelledError, StageContext
+from cancel_separator.stages.base import BaseStage
 
 logger = logging.getLogger(__name__)
 

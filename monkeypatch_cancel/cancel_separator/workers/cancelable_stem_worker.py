@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 # Model config — matches production pikaraoke settings
 MODEL_NAME = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt"
-DEFAULT_MODEL_DIR = "./audio-separator/models"
+DEFAULT_MODEL_DIR = str(Path(__file__).resolve().parent.parent.parent.parent / "models")
 SEPARATION_FORMAT = "wav"
 
 
@@ -516,7 +516,7 @@ def _setup_worker_logger(log_level: int = logging.INFO) -> logging.Logger:
             "[%(asctime)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S"
         )
     )
-    processing_logger = logging.getLogger("cancel_test.worker")
+    processing_logger = logging.getLogger("cancel_separator.worker")
     processing_logger.handlers = []
     processing_logger.addHandler(handler)
     processing_logger.propagate = False

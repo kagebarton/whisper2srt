@@ -45,15 +45,15 @@ import threading
 import time
 from pathlib import Path
 
-# Add project root to sys.path so cancel_test is importable
+# Add monkeypatch_cancel to sys.path so cancel_separator is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cancel_test.context import CancelledError, StageContext
-from cancel_test.orchestrator import StageOrchestrator
-from cancel_test.stages.ffmpeg_extract import FFmpegExtractStage
-from cancel_test.stages.ffmpeg_transcode import FFmpegTranscodeStage
-from cancel_test.stages.stem_separation import StemSeparationStage
-from cancel_test.workers.cancelable_stem_worker import (
+from cancel_separator.context import CancelledError, StageContext
+from cancel_separator.orchestrator import StageOrchestrator
+from cancel_separator.stages.ffmpeg_extract import FFmpegExtractStage
+from cancel_separator.stages.ffmpeg_transcode import FFmpegTranscodeStage
+from cancel_separator.stages.stem_separation import StemSeparationStage
+from cancel_separator.workers.cancelable_stem_worker import (
     CancelableStemWorker,
     WorkerCancelledError,
 )

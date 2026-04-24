@@ -1,4 +1,4 @@
-# cancel-test: Mid-Separation Cancellation Proof-of-Concept
+# cancel_separator: Mid-Separation Cancellation Proof-of-Concept
 
 This project demonstrates how to **cancel audio-separator mid-separation without losing the loaded model**, using the stage-based pipeline architecture from the pipeline-robustness-fixes plan (A1).
 
@@ -103,11 +103,10 @@ cancel Pipe.send(1)  ──────►   cancel_recv.poll(0)
 
 ### Quick test (recommended)
 
-The standalone test requires only `audio-separator` to be installed — no pikaraoke imports:
+The standalone test requires only `audio-separator` to be installed:
 
 ```bash
-# From the pikaraoke project root
-cd cancel_test
+# From the monkeypatch_cancel/cancel_separator/ folder
 
 # Basic test: cancel after 5 seconds, then re-run to prove model survives
 python test_cancel_standalone.py /path/to/song.mp4 --cancel-after 5
@@ -115,6 +114,8 @@ python test_cancel_standalone.py /path/to/song.mp4 --cancel-after 5
 # Cancel sooner (if you have a fast GPU)
 python test_cancel_standalone.py /path/to/song.mp4 --cancel-after 2
 ```
+
+Models are resolved from `<workspace_root>/models/` (absolute path, independent of working directory).
 
 Expected output:
 ```
@@ -137,6 +138,7 @@ STEP 3: Re-running separation (model should still be loaded)
 ### Interactive test (full pipeline)
 
 ```bash
+# From the monkeypatch_cancel/cancel_separator/ folder
 # Start the full stage pipeline with interactive controls
 python run_test.py /path/to/song.mp4 --direct --cancel-after 5
 ```
@@ -144,6 +146,7 @@ python run_test.py /path/to/song.mp4 --direct --cancel-after 5
 ### Auto test (multiple iterations)
 
 ```bash
+# From the monkeypatch_cancel/cancel_separator/ folder
 # Cancel and re-process 3 times to verify consistency
 python run_test.py /path/to/song.mp4 --auto --cancel-after 5 --loop 3
 ```

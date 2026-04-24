@@ -23,10 +23,10 @@ import threading
 from pathlib import Path
 from typing import Sequence
 
-from cancel_test.context import CancelledError, StageContext
-from cancel_test.stages.base import PipelineStage
-from cancel_test.stages.stem_separation import StemSeparationStage
-from cancel_test.workers.cancelable_stem_worker import CancelableStemWorker
+from cancel_separator.context import CancelledError, StageContext
+from cancel_separator.stages.base import PipelineStage
+from cancel_separator.stages.stem_separation import StemSeparationStage
+from cancel_separator.workers.cancelable_stem_worker import CancelableStemWorker
 
 logger = logging.getLogger(__name__)
 

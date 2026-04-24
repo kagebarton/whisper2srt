@@ -17,9 +17,9 @@ the next job.
 import logging
 from pathlib import Path
 
-from cancel_test.context import CancelledError, StageContext
-from cancel_test.stages.base import BaseStage
-from cancel_test.workers.cancelable_stem_worker import (
+from cancel_separator.context import CancelledError, StageContext
+from cancel_separator.stages.base import BaseStage
+from cancel_separator.workers.cancelable_stem_worker import (
     CancelableStemWorker,
     WorkerCancelledError,
     WorkerDiedError,

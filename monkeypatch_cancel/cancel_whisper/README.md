@@ -2,7 +2,7 @@
 
 This project demonstrates how to **cancel stable-ts `model.align()` and `model.refine()` mid-computation without losing the loaded model**, using a monkey-patch on `model.encode()`.
 
-This is the stable-ts equivalent of `cancel_test/` (which solves the same problem for audio-separator).
+This is the stable-ts equivalent of `cancel_separator/` (which solves the same problem for audio-separator).
 
 ## The Problem
 
@@ -39,7 +39,7 @@ By **monkey-patching `model.encode()`** to check a `threading.Event` before each
 
 ### Why not a subprocess like audio-separator?
 
-The audio-separator cancel_test uses a subprocess + Pipe bridging because the model is loaded in the worker subprocess — the main process can kill the worker without losing its own state.
+The audio-separator cancel_separator uses a subprocess + Pipe bridging because the model is loaded in the worker subprocess — the main process can kill the worker without losing its own state.
 
 For stable-ts, the model is loaded in the **same process** (same as audio-separator, actually), but there's no need for a subprocess because:
 - `model.encode()` is a regular method we can patch in-process
@@ -104,10 +104,10 @@ Caught in CancelableWhisperWorker.align():
   - Ready for next job ✓
 ```
 
-## Comparison with audio-separator cancel_test
+## Comparison with audio-separator cancel_separator
 
-| Aspect | audio-separator (cancel_test) | stable-ts (cancel_whisper) |
-|--------|-------------------------------|----------------------------|
+| Aspect | audio-separator (cancel_separator) | stable-ts (cancel_whisper) |
+|--------|--------------------------------------|----------------------------|
 | **Runs in subprocess?** | Yes (CancelableStemWorker) | No (same process) |
 | **Cancel signaling** | threading.Event → Pipe → subprocess | threading.Event directly |
 | **Patch target** | `model_run.forward()` | `model.encode()` |
@@ -128,11 +128,10 @@ Caught in CancelableWhisperWorker.align():
 
 ### Quick test (recommended)
 
-The standalone test requires only `stable-ts` + `faster-whisper` — no other project imports needed:
+The standalone test requires only `stable-ts` + `faster-whisper`:
 
 ```bash
-# From the whisper2srt project root
-cd cancel_whisper
+# From the monkeypatch_cancel/cancel_whisper/ folder
 
 # Basic test: cancel after 5 seconds, then re-run to prove model survives
 python test_cancel_whisper.py /path/to/vocals.wav /path/to/lyrics.txt --cancel-after 5
@@ -143,6 +142,8 @@ python test_cancel_whisper.py /path/to/vocals.wav /path/to/lyrics.txt --cancel-a
 # Custom model path
 python test_cancel_whisper.py /path/to/vocals.wav /path/to/lyrics.txt --model-path /path/to/whisper-model
 ```
+
+By default, model paths are resolved from `<workspace_root>/models/` (absolute path, independent of working directory).
 
 Expected output:
 ```

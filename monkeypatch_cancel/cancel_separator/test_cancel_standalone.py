@@ -31,7 +31,7 @@ from pathlib import Path
 
 # --- Configuration (same as production pikaraoke) ---
 MODEL_NAME = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt"
-DEFAULT_MODEL_DIR = "./audio-separator/models"
+DEFAULT_MODEL_DIR = str(Path(__file__).resolve().parent.parent.parent / "models")
 SEPARATION_FORMAT = "wav"
 
 logging.basicConfig(

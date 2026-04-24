@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from typing import Protocol, runtime_checkable
 
-from cancel_test.context import StageContext
+from cancel_separator.context import StageContext
 
 logger = logging.getLogger(__name__)
 
