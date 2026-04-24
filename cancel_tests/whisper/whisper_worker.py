@@ -153,7 +153,9 @@ class WhisperWorker:
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        model_source = self._config.model_path or "turbo"
+        model_source = self._config.model_path or str(
+            Path(__file__).resolve().parent.parent.parent / "models" / "large-v3-turbo.pt"
+        )
         logger.info(f"Loading whisper model: {model_source} on {device}")
         start = time.time()
 
@@ -386,11 +388,18 @@ class WhisperWorker:
 
         # --- Register forward pre-hook on encoder for cancel check ---
         encode_counter = [0]
+        align_start_time = time.time()
 
         def cancel_pre_hook(module, inputs):
             # Check cancel BEFORE running the encoder forward pass.
             # This means we cancel between encoder calls, not mid-inference.
-            if cancel_event.is_set():
+            elapsed = time.time() - align_start_time
+            is_set = cancel_event.is_set()
+            logger.info(
+                f"[diag] encoder hook fired #{encode_counter[0] + 1} "
+                f"at t={elapsed:.2f}s (cancel_set={is_set})"
+            )
+            if is_set:
                 logger.info(
                     f"Cancel detected before encode pass "
                     f"#{encode_counter[0] + 1} — aborting"
@@ -399,7 +408,7 @@ class WhisperWorker:
             encode_counter[0] += 1  # counts passes STARTED, not completed
 
         handle = self._encoder_module.register_forward_pre_hook(cancel_pre_hook)
-        logger.debug("Registered forward pre-hook on encoder for per-pass cancel check")
+        logger.info("[diag] Registered forward pre-hook on encoder")
 
         try:
             return self._model.align(str(vocal_path), lyrics_text, **align_kwargs)

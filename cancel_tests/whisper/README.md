@@ -46,11 +46,11 @@ The hook applies to **all three operations** — `align()`, `refine()`, and `tra
 The prototype is configured to use a local PyTorch Whisper model:
 
 ```
-model_path: "/home/ken/whisper2srt/whisper-model/large-v3-turbo.pt"
+model_path: "<workspace_root>/models/large-v3-turbo.pt"  (absolute path, resolved from script location)
 device: "auto"  # uses CUDA if available, else CPU
 ```
 
-This is the **large-v3-turbo** model (a fine-tuned variant of OpenAI's Whisper large-v3). It is stored at the absolute path shown above in the workspace. You can override it via `--model-path` on the command line or by constructing a custom `WhisperModelConfig`.
+This is the **large-v3-turbo** model (a fine-tuned variant of OpenAI's Whisper large-v3). You can override it via `--model-path` on the command line or by constructing a custom `WhisperModelConfig`.
 
 ### The `compute_type` Field
 
@@ -81,37 +81,39 @@ All alignment parameters are exposed in `config.py`:
 ### Prerequisites
 
 1. Python environment with `stable-ts` and `openai-whisper` installed
-2. A Whisper `.pt` model file accessible at the configured path
+2. A Whisper `.pt` model file (by default at `<workspace_root>/models/large-v3-turbo.pt`)
 3. A vocal stem WAV file (output from audio separation)
 4. A plain-text lyrics file (one or more lines, matching the vocal content)
 
 ### Basic Usage
 
 ```bash
-# From the workspace root:
-python -m cancel_tests.whisper.test_cancel_whisper vocals.wav lyrics.txt
+# From the cancel_tests/whisper/ folder:
+python test_cancel_whisper.py vocals.wav lyrics.txt
 
 # Cancel alignment after 5 seconds (default):
-python -m cancel_tests.whisper.test_cancel_whisper vocals.wav lyrics.txt
+python test_cancel_whisper.py vocals.wav lyrics.txt
 
 # Cancel sooner (faster cancellation test):
-python -m cancel_tests.whisper.test_cancel_whisper vocals.wav lyrics.txt --cancel-after 2
+python test_cancel_whisper.py vocals.wav lyrics.txt --cancel-after 2
 
 # Cancel during refinement instead of alignment:
-python -m cancel_tests.whisper.test_cancel_whisper vocals.wav lyrics.txt --phase refine
+python test_cancel_whisper.py vocals.wav lyrics.txt --phase refine
 ```
 
 ### Custom Model Path
 
 ```bash
 # Use a different local .pt model:
-python -m cancel_tests.whisper.test_cancel_whisper vocals.wav lyrics.txt \
+python test_cancel_whisper.py vocals.wav lyrics.txt \
   --model-path /path/to/model.pt
 
 # Use a model by short name (will auto-download if not cached):
-python -m cancel_tests.whisper.test_cancel_whisper vocals.wav lyrics.txt \
+python test_cancel_whisper.py vocals.wav lyrics.txt \
   --model-path turbo
 ```
+
+The default model path (`<workspace_root>/models/large-v3-turbo.pt`) is resolved from the script location, independent of working directory.
 
 ### Phase Selection
 
@@ -316,13 +318,13 @@ If you port this back to pipeline, remember to **drop** the `cancel_event.clear(
 
 | Setting | Default | Source |
 |---------|---------|--------|
-| Model path | `/home/ken/whisper2srt/whisper-model/large-v3-turbo.pt` | `config.py` line 25 |
-| Device | `auto` | `config.py` line 28 |
-| Language | `en` | `config.py` line 35 |
-| VAD enabled | `True` | `config.py` line 36 |
-| VAD threshold | `0.25` | `config.py` line 37 |
-| Refine steps | `"s"` | `config.py` line 43 |
-| Refine word-level | `False` | `config.py` line 44 |
+| Model path | `<workspace_root>/models/large-v3-turbo.pt` | `config.py` (resolved from file location) |
+| Device | `auto` | `config.py` |
+| Language | `en` | `config.py` |
+| VAD enabled | `True` | `config.py` |
+| VAD threshold | `0.25` | `config.py` |
+| Refine steps | `"s"` | `config.py` |
+| Refine word-level | `False` | `config.py` |
 
 All alignment parameters mirror `snippets/stable_align.py`.
 
