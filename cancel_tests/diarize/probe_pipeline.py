@@ -26,7 +26,7 @@ from pathlib import Path
 
 # Point HF cache at the local pre-downloaded model folder BEFORE importing
 # anything that pulls in huggingface_hub or pyannote.
-MODEL_CACHE_DIR = Path(__file__).resolve().parent.parent / "pyann-models"
+MODEL_CACHE_DIR = Path(__file__).resolve().parent.parent / "models"
 os.environ["HF_HOME"] = str(MODEL_CACHE_DIR)
 
 # Add project root to sys.path

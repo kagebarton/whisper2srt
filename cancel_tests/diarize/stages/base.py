@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Protocol, runtime_checkable
 
-from cancel_diarize.context import StageContext
+from diarize.context import StageContext
 
 logger = logging.getLogger(__name__)
 

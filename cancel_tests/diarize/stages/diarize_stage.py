@@ -10,9 +10,9 @@ check it. The model stays loaded across cancellations.
 
 import logging
 
-from cancel_diarize.context import StageContext
-from cancel_diarize.stages.base import BaseStage
-from cancel_diarize.workers.cancelable_diarize_worker import (
+from diarize.context import StageContext
+from diarize.stages.base import BaseStage
+from diarize.workers.cancelable_diarize_worker import (
     CancelableDiarizeWorker,
     DiarizationCancelledError,
 )

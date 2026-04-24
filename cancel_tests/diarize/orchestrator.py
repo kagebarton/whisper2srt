@@ -21,9 +21,9 @@ import threading
 from pathlib import Path
 from typing import Sequence
 
-from cancel_diarize.context import CancelledError, StageContext
-from cancel_diarize.stages.base import PipelineStage
-from cancel_diarize.workers.cancelable_diarize_worker import CancelableDiarizeWorker
+from diarize.context import CancelledError, StageContext
+from diarize.stages.base import PipelineStage
+from diarize.workers.cancelable_diarize_worker import CancelableDiarizeWorker
 
 logger = logging.getLogger(__name__)
 

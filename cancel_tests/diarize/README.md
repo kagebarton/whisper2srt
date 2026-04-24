@@ -133,10 +133,7 @@ Caught in CancelableDiarizeWorker.diarize():
 ### Quick test (standalone, no orchestrator)
 
 ```bash
-# From the whisper2srt project root
-cd cancel_diarize
-
-# Basic test: cancel after 5 seconds, then re-run to prove model survives
+# From the cancel_tests/diarize/ folder
 python test_cancel_diarize.py /path/to/vocals.wav --cancel-after 5
 
 # Cancel later to test embedding-phase cancel (previously impossible)
@@ -152,6 +149,8 @@ python test_cancel_diarize.py /path/to/vocals.wav --num-speakers 2
 ### Caption output test
 
 ```bash
+# From the cancel_tests/diarize/ folder
+
 # Generate both SRT and ASS from diarization
 python run_test.py /path/to/vocals.wav both
 
@@ -168,6 +167,7 @@ python run_test.py /path/to/vocals.wav both --auto --cancel-stage embedding
 ### Pre-implementation probe
 
 ```bash
+# From the cancel_tests/diarize/ folder
 # Validate architecture assumptions before relying on the two-layer design
 python probe_pipeline.py /path/to/vocals.wav
 ```
@@ -263,6 +263,8 @@ pyannote's speaker diarization model is gated — you need a HuggingFace token w
    - `HF_TOKEN` environment variable
    - `--hf-token /path/to/token.txt` flag
    - `DiarizeConfig(hf_token_path=...)`
+
+**Model cache location:** By default, pyannote models are cached at `<workspace_root>/models/` (HF_HOME is set to this location automatically when the test script runs). This is resolved from the script location, independent of working directory.
 
 ## Limitations
 

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import srt
 
-from cancel_diarize.config import DiarizeConfig
+from diarize.config import DiarizeConfig
 
 logger = logging.getLogger(__name__)
 

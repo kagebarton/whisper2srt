@@ -25,14 +25,19 @@ Cancel granularity:
 """
 
 import logging
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from cancel_diarize.config import DiarizeConfig
+import torch
+import torchaudio
+
+from diarize.config import DiarizeConfig
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 class _Cancelled(Exception):
@@ -416,6 +421,8 @@ class CancelableDiarizeWorker:
         # --- Layer 1: pyannote hook callback (always installed) ---
         # The cancel check is guarded on cancel_event so the same callback
         # works with or without cancellation.
+        _prev_stage: list[str] = [""]  # mutable cell for closure
+
         def pyannote_hook(step_name, *args, completed=None, total=None, **kwargs):
             self._current_stage = step_name
 
@@ -426,8 +433,15 @@ class CancelableDiarizeWorker:
                 raise _Cancelled()
 
             if completed is not None and total:
-                logger.info(f"Progress: {step_name} {completed}/{total}")
-            # else: stage-start events — don't spam the log
+                if _prev_stage[0] and _prev_stage[0] != step_name:
+                    sys.stderr.write("\n")
+                _prev_stage[0] = step_name
+                line = f"Progress: {step_name} {completed}/{total}"
+                sys.stderr.write(f"\r{line}")
+                sys.stderr.flush()
+                if completed == total:
+                    sys.stderr.write("\n")
+                    sys.stderr.flush()
 
         return pyannote_hook
 
@@ -459,13 +473,22 @@ class CancelableDiarizeWorker:
         """
         logger.info(f"Diarization started on {vocal_path.name}")
 
+        # Pre-load audio as a waveform tensor so pyannote never calls
+        # torchcodec's AudioDecoder, which returns None for
+        # duration_seconds_from_header on M4A and other container formats.
+        waveform, sample_rate = torchaudio.load(str(vocal_path))
+        audio_file = {
+            "waveform": waveform,
+            "sample_rate": sample_rate,
+            "uri": vocal_path.stem,
+        }
+
         # Build pipeline call kwargs
         call_kwargs = dict(kwargs)
         if hook is not None:
             call_kwargs["hook"] = hook
 
-        # pyannote pipeline() accepts a file path or dict
-        result = self._pipeline(str(vocal_path), **call_kwargs)
+        result = self._pipeline(audio_file, **call_kwargs)
 
         # pyannote 4.x returns DiarizeOutput(speaker_diarization=Annotation, ...)
         # pyannote 3.x returns Annotation directly

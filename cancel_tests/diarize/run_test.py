@@ -50,15 +50,15 @@ from pathlib import Path
 
 # Point HF cache at the local pre-downloaded model folder BEFORE importing
 # anything that pulls in huggingface_hub or pyannote.
-MODEL_CACHE_DIR = Path(__file__).resolve().parent.parent / "pyann-models"
+MODEL_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "models"
 os.environ["HF_HOME"] = str(MODEL_CACHE_DIR)
 
-# Add project root to sys.path
+# Add cancel_tests to sys.path so diarize package is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cancel_diarize.caption import generate_ass, generate_srt
-from cancel_diarize.config import DiarizeConfig
-from cancel_diarize.workers.cancelable_diarize_worker import (
+from diarize.caption import generate_ass, generate_srt
+from diarize.config import DiarizeConfig
+from diarize.workers.cancelable_diarize_worker import (
     CancelableDiarizeWorker,
     DiarizationCancelledError,
 )
