@@ -1,11 +1,11 @@
 """CLI entry point for the staged pipeline prototype.
 
-Usage:
-python -m pipeline.run_pipeline <audio_file> <lyrics_file>
+Usage (from inside the pipeline/ folder):
+python run_pipeline.py <audio_file> [lyrics_file]
 
 Takes only positional args — no CLI flags. To change values, edit
-pipeline/config.py or construct a PipelineConfig with overrides and
-pass it to the orchestrator programmatically.
+config.py or construct a PipelineConfig with overrides and pass it to
+the orchestrator programmatically.
 """
 
 import argparse

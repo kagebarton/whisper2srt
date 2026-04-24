@@ -105,7 +105,7 @@ class WhisperWorker:
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        model_source = self._config.model_path or "turbo"
+        model_source = self._config.model_path
         logger.info(f"Loading whisper model: {model_source} on {device}")
         start = time.time()
 
