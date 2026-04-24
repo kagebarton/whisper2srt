@@ -27,12 +27,12 @@ This is cleaner and more maintainable than monkey-patching `forward()` because i
 
 ## Model: `vocals_mel_band_roformer.ckpt`
 
-**This prototype is specifically designed and tested with the `vocals_mel_band_roformer.ckpt` model located in the `audio-separator/models/` directory.**
+**This prototype is specifically designed and tested with the `vocals_mel_band_roformer.ckpt` model located in the `<workspace_root>/models/` directory.**
 
 ### Model Details
 
 - **Filename:** `vocals_mel_band_roformer.ckpt`
-- **Path:** `<workspace_root>/audio-separator/models/vocals_mel_band_roformer.ckpt`
+- **Path:** `<workspace_root>/models/vocals_mel_band_roformer.ckpt`
 - **Config:** `vocals_mel_band_roformer.yaml` (same directory)
 - **Type:** Mel-Band Roformer trained for vocal separation
 - **Stems:** Produces `(vocals)` and `(other)` stems (non-karaoke variant)
@@ -46,30 +46,30 @@ The stem identification logic in `stem_worker.py` (lines 467–477) includes the
 ### Prerequisites
 
 1. Python environment with `audio-separator` installed
-2. `vocals_mel_band_roformer.ckpt` and its `.yaml` config in `audio-separator/models/`
+2. Model files in `<workspace_root>/models/` (e.g., `vocals_mel_band_roformer.ckpt` and `mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt`)
 3. A test audio file (WAV format recommended)
 
 ### Basic Usage
 
 ```bash
-# From the workspace root:
-python -m cancel_tests.separator.run_test path/to/input.wav
+# From the cancel_tests/separator/ folder:
+python run_test.py path/to/input.wav
 
 # With custom cancel timing (default: cancel after 3 seconds):
-python -m cancel_tests.separator.run_test path/to/input.wav --cancel-after 5.0
+python run_test.py path/to/input.wav --cancel-after 5.0
 ```
 
 ### Custom Model Directory/Name
 
-If your model isn't in the default location (`./audio-separator/models`) or you want to use a different filename:
+If you want to use a different model filename or override the model location:
 
 ```bash
-python -m cancel_tests.separator.run_test input.wav \
+python run_test.py input.wav \
   --model-dir /path/to/models \
   --model-name vocals_mel_band_roformer.ckpt
 ```
 
-**Default values:** `--model-dir` defaults to `./audio-separator/models`, `--model-name` defaults to `mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt` (the karaoke variant). When using the `vocals_mel_band_roformer.ckpt` file, you **must** specify `--model-name` unless you change the default in `stem_worker.py`.
+**Default values:** Model directory defaults to `<workspace_root>/models/` (absolute path, not relative). Model name defaults to `mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt`. When using the `vocals_mel_band_roformer.ckpt` file, specify `--model-name` to override the default.
 
 ### What the Test Proves
 
@@ -94,9 +94,10 @@ from cancel_tests.separator.stem_worker import StemWorker, WorkerCancelledError
 from pathlib import Path
 import threading
 
+# Model directory is resolved from file location; override with absolute path if needed
 worker = StemWorker(
     temp_dir="/tmp/separator",
-    model_dir="./audio-separator/models",
+    model_dir="/home/ken/whisper2srt/models",  # or omit for default
     model_name="vocals_mel_band_roformer.ckpt",
     log_level=logging.INFO,
 )
@@ -129,8 +130,8 @@ worker.stop()
 ## Configuration Notes
 
 - **Output format:** Fixed to `wav` (line 53 in `stem_worker.py`)
-- **Default model (code):** `DEFAULT_MODEL_NAME = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt"` — **override this when using `vocals_mel_band_roformer.ckpt`**
-- **Default model dir:** `DEFAULT_MODEL_DIR = "./audio-separator/models"` (relative to CWD)
+- **Default model (code):** `DEFAULT_MODEL_NAME = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt"` — override via `--model-name` when using `vocals_mel_band_roformer.ckpt`
+- **Default model dir:** Computed from file location (`<workspace_root>/models`) — absolute path, independent of CWD
 - **Logger name:** `cancel_tests.separator.stem_worker` (differs from production's `pipeline.workers.stem_worker`)
 
 ## Architecture Reference
@@ -144,12 +145,12 @@ See `hook-cancel-plan.md` for the full design rationale and `hook-cancel-review.
 | Subprocess lifetime | One per session | One per session (unchanged) |
 | Model persistence after cancel | No (model survives but cancellation only between jobs) | **Yes** — model stays loaded, next job runs immediately |
 
-## Relation to `audio-separator/`
+## Model Location
 
-The `audio-separator/` folder (at the workspace root) contains the model files used by this prototype. The `vocals_mel_band_roformer.ckpt` file is the **recommended model** for testing this prototype because:
+The `<workspace_root>/models/` directory contains the model files used by this prototype. The `vocals_mel_band_roformer.ckpt` file is the **recommended model** for testing this prototype because:
 
 1. It is the non-karaoke MelBand Roformer variant (outputs `(vocals)` / `(other)`)
 2. The prototype's stem identification logic explicitly handles the `(other)` stem label
 3. It has been verified to work with the forward pre-hook injection pattern
 
-When using this model, ensure both `.ckpt` and `.yaml` files are present in the `audio-separator/models/` directory or the path you specify via `--model-dir`.
+When using this model, ensure both `.ckpt` and `.yaml` files are present in the `<workspace_root>/models/` directory.

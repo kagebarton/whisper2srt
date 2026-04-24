@@ -48,8 +48,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL_NAME = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt"
-DEFAULT_MODEL_DIR = "./audio-separator/models"
+DEFAULT_MODEL_NAME = "vocals_mel_band_roformer.ckpt"
+DEFAULT_MODEL_DIR = str(Path(__file__).resolve().parent.parent.parent / "models")
 SEPARATION_FORMAT = "wav"
 
 
