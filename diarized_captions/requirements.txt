@@ -1,0 +1,6 @@
+stable-ts
+faster-whisper
+srt
+pyannote.audio
+torch
+torchaudio
