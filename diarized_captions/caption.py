@@ -16,16 +16,16 @@ def generate_srt(line_objects, cfg):
     """Build .srt content from line objects.
 
     Each line is prefixed with the speaker letter (e.g. "A: Hello world").
-    In single-speaker mode (only one speaker letter appears in all lines),
-    the prefix is omitted — output is plain lyric text, matching the
-    non-diarized pipeline output.
+    Lines with speaker=None (overlap/ensemble regions) have no prefix.
+    In single-speaker mode (only one speaker letter, no ensemble lines),
+    the prefix is omitted entirely — plain lyric text.
     """
-    present = sorted({l["speaker"] for l in line_objects}) if line_objects else []
-    single_speaker = len(present) <= 1
+    present, has_ensemble = _speaker_presence(line_objects)
+    single_speaker = len(present) <= 1 and not has_ensemble
 
     subs = []
     for i, line in enumerate(line_objects, start=1):
-        if single_speaker:
+        if single_speaker or line["speaker"] is None:
             content = line["text"]
         else:
             content = f"{line['speaker']}: {line['text']}"
@@ -45,16 +45,18 @@ def generate_ass(line_objects, cfg):
 
     Header gets one Style per speaker letter that actually appears in the
     line objects — keeps the file lean if only A/B are present.
+    Lines with speaker=None (overlap/ensemble regions) get a plain white
+    ``Style: Karaoke_ensemble`` with no speaker prefix.
 
-    Single-speaker fallback: if only one speaker letter appears, emit a
-    single ``Style: Karaoke`` (no letter suffix) with goldenrod primary
-    color and skip the speaker prefix in every Dialogue line. Output is
-    visually identical to a standard non-diarized karaoke file.
+    Single-speaker fallback: if only one speaker letter appears and there
+    are no ensemble lines, emit a single ``Style: Karaoke`` (no letter
+    suffix) with goldenrod primary color and skip the speaker prefix.
+    Output is visually identical to a standard non-diarized karaoke file.
     """
-    present = sorted({l["speaker"] for l in line_objects}) if line_objects else []
-    single_speaker = len(present) <= 1
+    present, has_ensemble = _speaker_presence(line_objects)
+    single_speaker = len(present) <= 1 and not has_ensemble
 
-    header = _generate_ass_header(cfg, present, single_speaker)
+    header = _generate_ass_header(cfg, present, single_speaker, has_ensemble)
     events = _generate_ass_events(line_objects, cfg, single_speaker)
     return header + "\n".join(events) + "\n"
 
@@ -64,9 +66,9 @@ def generate_ass(line_objects, cfg):
 # ---------------------------------------------------------------------------
 
 
-def _generate_ass_header(cfg, present, single_speaker):
+def _generate_ass_header(cfg, present, single_speaker, has_ensemble=False):
     """Generate the [Script Info] + [V4+ Styles] + [Events] Format header."""
-    styles_block = _generate_styles(cfg, present, single_speaker)
+    styles_block = _generate_styles(cfg, present, single_speaker, has_ensemble)
     return (
         f"[Script Info]\n"
         f"Title: Karaoke Subtitles\n"
@@ -87,8 +89,16 @@ def _generate_ass_header(cfg, present, single_speaker):
     )
 
 
-def _generate_styles(cfg, present, single_speaker):
-    """Generate one Style row per speaker, or a single Karaoke style for single-speaker."""
+_ENSEMBLE_STYLE = "Karaoke_ensemble"
+_ENSEMBLE_COLOR = "&H00FFFFFF&"  # white — no speaker attribution
+
+
+def _generate_styles(cfg, present, single_speaker, has_ensemble=False):
+    """Generate one Style row per speaker, or a single Karaoke style for single-speaker.
+
+    When has_ensemble is True, also adds Karaoke_ensemble (white primary,
+    no italic) for lines where multiple speakers overlap.
+    """
     rows = []
     if single_speaker:
         # Use goldenrod (pipeline default) — first entry in speaker_colors
@@ -113,6 +123,15 @@ def _generate_styles(cfg, present, single_speaker):
                 f"{cfg.outline_width},{cfg.shadow_offset},2,"
                 f"{cfg.margin_left},{cfg.margin_right},{cfg.margin_vertical},1"
             )
+    if has_ensemble:
+        rows.append(
+            f"Style: {_ENSEMBLE_STYLE},{cfg.font_name},{cfg.font_size},"
+            f"{_ENSEMBLE_COLOR},{cfg.secondary_color},"
+            f"{cfg.outline_color},{cfg.back_color},"
+            f"0,0,0,0,100,100,0,0,1,"
+            f"{cfg.outline_width},{cfg.shadow_offset},2,"
+            f"{cfg.margin_left},{cfg.margin_right},{cfg.margin_vertical},1"
+        )
     return "\n".join(rows) + "\n"
 
 
@@ -129,11 +148,14 @@ def _generate_ass_events(line_objects, cfg, single_speaker):
         if not words:
             continue
 
-        # Determine style name
+        # Determine style name; None speaker → ensemble style, no prefix
+        speaker = line_obj["speaker"]
         if single_speaker:
             style = "Karaoke"
+        elif speaker is None:
+            style = _ENSEMBLE_STYLE
         else:
-            style = f"Karaoke_{line_obj['speaker']}"
+            style = f"Karaoke_{speaker}"
 
         # Pad the event window around the sung word boundaries
         event_start = max(0.0, words[0]["start"] - cfg.line_lead_in_cs / 100.0)
@@ -145,9 +167,9 @@ def _generate_ass_events(line_objects, cfg, single_speaker):
         prev_end = event_start
         parts = []
 
-        # Speaker prefix (plain text, no \kf) — omitted in single-speaker mode
-        if not single_speaker:
-            parts.append(f"{line_obj['speaker']}: ")
+        # Speaker prefix (plain text, no \kf) — omitted in single-speaker or ensemble
+        if not single_speaker and speaker is not None:
+            parts.append(f"{speaker}: ")
 
         for i, word_data in enumerate(words):
             word = word_data["word"]
@@ -192,6 +214,17 @@ def _generate_ass_events(line_objects, cfg, single_speaker):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _speaker_presence(line_objects):
+    """Return (present_letters, has_ensemble) for a list of line objects.
+
+    present_letters: sorted list of non-None speaker letters that appear.
+    has_ensemble: True if any line has speaker=None (overlap region).
+    """
+    present = sorted({l["speaker"] for l in line_objects if l["speaker"] is not None})
+    has_ensemble = any(l["speaker"] is None for l in line_objects)
+    return present, has_ensemble
 
 
 def _seconds_to_ass_time(seconds: float) -> str:

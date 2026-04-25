@@ -314,7 +314,10 @@ class CancelableDiarizeWorker:
                 with progress logging only.
 
         Returns:
-            List of turn dicts: [{"speaker": str, "start": float, "end": float}, ...]
+            (turns, overlap_intervals) where turns is a list of
+            {"speaker": str, "start": float, "end": float} dicts and
+            overlap_intervals is a list of (start, end) float pairs marking
+            regions where 2+ speakers are simultaneously active.
 
         Raises:
             DiarizationCancelledError: If diarization was cancelled mid-computation.
@@ -342,7 +345,9 @@ class CancelableDiarizeWorker:
         pyannote_hook = self._install_hooks(cancel_event)
 
         try:
-            turns = self._run_diarization(vocal_path, hook=pyannote_hook, **kwargs)
+            turns, overlap_intervals = self._run_diarization(
+                vocal_path, hook=pyannote_hook, **kwargs
+            )
 
             # Fallback: if pyannote swallows hook exceptions, the callback
             # sets _cancel_requested instead of raising. Check it here.
@@ -357,7 +362,7 @@ class CancelableDiarizeWorker:
                     f"Cancelled during stage={stage} after {total_batches} forward passes"
                 )
 
-            return turns
+            return turns, overlap_intervals
 
         except _Cancelled:
             _clear_gpu_state()
@@ -463,13 +468,18 @@ class CancelableDiarizeWorker:
 
     def _run_diarization(
         self, vocal_path: Path, hook: Optional[Callable] = None, **kwargs
-    ) -> list[dict]:
-        """Run the pyannote pipeline and convert to turn dicts.
+    ) -> tuple[list[dict], list[tuple[float, float]]]:
+        """Run the pyannote pipeline and convert to turn dicts + overlap intervals.
 
         Args:
             vocal_path: Path to the vocal stem audio file.
             hook: Optional pyannote-style callback for progress/cancel.
             **kwargs: Pipeline kwargs (num_speakers, min_speakers, max_speakers).
+
+        Returns:
+            (turns, overlap_intervals) where overlap_intervals is a list of
+            (start, end) float pairs marking regions where 2+ speakers are
+            simultaneously active.
         """
         logger.info(f"Diarization started on {vocal_path.name}")
 
@@ -494,6 +504,14 @@ class CancelableDiarizeWorker:
         # pyannote 3.x returns Annotation directly
         annotation = getattr(result, "speaker_diarization", result)
 
+        # Compute overlap intervals: time ranges where 2+ speakers are
+        # simultaneously active, derived from the full annotation via sweep line.
+        overlap_intervals = _compute_overlap_intervals(annotation)
+        if overlap_intervals:
+            logger.info(
+                f"Overlap regions detected: {len(overlap_intervals)} interval(s)"
+            )
+
         # Convert Annotation to list of turn dicts
         turns = []
         for turn, _, speaker in annotation.itertracks(yield_label=True):
@@ -509,7 +527,41 @@ class CancelableDiarizeWorker:
         logger.info(
             f"Diarization complete: {len(turns)} turns, {len(speakers)} speakers"
         )
-        return turns
+        return turns, overlap_intervals
+
+
+# ------------------------------------------------------------------
+# Overlap interval computation
+# ------------------------------------------------------------------
+
+
+def _compute_overlap_intervals(annotation) -> list[tuple[float, float]]:
+    """Sweep-line: return intervals where 2+ speakers are simultaneously active.
+
+    Uses the full (non-exclusive) pyannote Annotation so that every
+    overlapping turn is visible.  At any time t with equal start/end events,
+    ends are processed before starts, so an instant where one speaker ends
+    exactly as another begins is NOT counted as overlap.
+    """
+    events: list[tuple[float, int]] = []
+    for segment, _, _ in annotation.itertracks(yield_label=True):
+        events.append((segment.start, 1))
+        events.append((segment.end, -1))
+    # Sort: at equal t, ends (-1) before starts (+1)
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    count = 0
+    overlap_start: Optional[float] = None
+    intervals: list[tuple[float, float]] = []
+    for t, delta in events:
+        prev = count
+        count += delta
+        if prev < 2 and count >= 2:
+            overlap_start = t
+        elif prev >= 2 and count < 2 and overlap_start is not None:
+            intervals.append((overlap_start, t))
+            overlap_start = None
+    return intervals
 
 
 # ------------------------------------------------------------------

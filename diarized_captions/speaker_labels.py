@@ -44,12 +44,15 @@ def remap_speakers_by_appearance(turns, cfg):
     return turns, label_map
 
 
-def assign_speakers_to_words(line_objects, turns):
-    """Attach a speaker letter to every word in every line object.
+def assign_speakers_to_words(line_objects, turns, overlap_intervals=None):
+    """Attach a speaker letter (or None) to every word in every line object.
 
     For each word, find the diarization turn with the largest temporal
     overlap. If the word falls entirely outside any turn (gap), pick the
     closest turn by midpoint distance — keeps every word labeled.
+
+    Words whose midpoint falls inside an overlap interval (2+ simultaneous
+    speakers) are assigned speaker=None instead of a letter.
 
     Raises:
         RuntimeError: if turns is empty (cannot label any words).
@@ -58,15 +61,20 @@ def assign_speakers_to_words(line_objects, turns):
         raise RuntimeError("Diarization produced zero turns — cannot label words")
     for line in line_objects:
         for w in line["words"]:
-            w["speaker"] = _word_speaker(w, turns)
+            w["speaker"] = _word_speaker(w, turns, overlap_intervals)
     return line_objects
 
 
-def _word_speaker(word, turns):
-    """Find the best speaker letter for a single word given diarization turns.
+def _word_speaker(word, turns, overlap_intervals=None):
+    """Return the speaker letter for a word, or None if it's in an overlap zone.
 
-    Strategy: largest overlap first; gap fallback to nearest turn by midpoint.
+    Strategy: check overlap intervals first; if the word's midpoint is in a
+    multi-speaker region, return None.  Otherwise pick the turn with the
+    largest temporal overlap; gap fallback to nearest turn by midpoint.
     """
+    if overlap_intervals and _midpoint_in_overlap(word, overlap_intervals):
+        return None
+
     best_turn, best_overlap = None, 0.0
     for t in turns:
         overlap = max(0.0, min(word["end"], t["end"]) - max(word["start"], t["start"]))
@@ -78,6 +86,12 @@ def _word_speaker(word, turns):
     mid = 0.5 * (word["start"] + word["end"])
     nearest = min(turns, key=lambda t: min(abs(mid - t["start"]), abs(mid - t["end"])))
     return nearest["letter"]
+
+
+def _midpoint_in_overlap(word, overlap_intervals):
+    """Return True if the word's midpoint falls inside any overlap interval."""
+    mid = 0.5 * (word["start"] + word["end"])
+    return any(start <= mid <= end for start, end in overlap_intervals)
 
 
 def reset_segment_first_flags(line_objects):

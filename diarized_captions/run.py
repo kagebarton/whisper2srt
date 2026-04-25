@@ -140,14 +140,14 @@ def main():
 
         # --- 2. Diarize the same vocal stem ---
         logger.info(f"Diarizing: {vocal_path.name}")
-        turns = diarize_worker.diarize(vocal_path)
+        turns, overlap_intervals = diarize_worker.diarize(vocal_path)
 
         # --- 3. Remap pyannote labels → A/B/C by appearance order ---
         turns, label_map = remap_speakers_by_appearance(turns, cfg)
         logger.info(f"Speakers detected: {list(label_map.values())}")
 
-        # --- 4. Attach speaker letter to every word ---
-        line_objects = assign_speakers_to_words(line_objects, turns)
+        # --- 4. Attach speaker letter to every word (None for overlap zones) ---
+        line_objects = assign_speakers_to_words(line_objects, turns, overlap_intervals)
 
         # --- 5. Split lines wherever speaker changes mid-line ---
         line_objects = split_lines_at_speaker_boundaries(line_objects)
