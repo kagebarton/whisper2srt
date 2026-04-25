@@ -3,15 +3,18 @@
 Runs ffmpeg loudnorm on the extracted WAV to capture loudness measurements
 for later use. No output file is produced — only measurement values are
 stored in the context artifacts.
+
+Uses run_ffmpeg() from _ffmpeg_helpers with capture_stderr=True for
+cancellation support.
 """
 
 import json
 import logging
-import subprocess
 from pathlib import Path
 
 from pipeline.config import PipelineConfig
-from pipeline.context import StageContext
+from pipeline.context import Phase, StageContext
+from pipeline.stages._ffmpeg_helpers import run_ffmpeg
 from pipeline.stages.base import BaseStage
 
 logger = logging.getLogger(__name__)
@@ -34,35 +37,24 @@ class LoudnormAnalyzeStage(BaseStage):
             "ffmpeg",
             "-hide_banner",
             "-nostats",
-            "-threads",
-            self._config.ffmpeg_threads,
-            "-i",
-            str(extracted_wav),
+            "-threads", self._config.ffmpeg_threads,
+            "-i", str(extracted_wav),
             "-af",
             f"loudnorm=I={self._config.loudnorm_target_i}"
             f":TP={self._config.loudnorm_target_tp}"
             f":LRA={self._config.loudnorm_target_lra}"
             f":print_format=json",
-            "-f",
-            "null",
+            "-f", "null",
             "-",
         ]
         logger.info(f"[{self.name}] Running loudnorm analysis on: {Path(extracted_wav).name}")
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
-
-        if result.returncode != 0:
-            stderr_tail = result.stderr[-500:] if result.stderr else ""
-            raise RuntimeError(f"ffmpeg loudnorm failed: {stderr_tail}")
+        stderr_str = run_ffmpeg(cmd, ctx, Phase.LOUDNORM, capture_stderr=True)
 
         # Parse the JSON block from stderr by walking backward from the end.
         # FFmpeg may emit other {...} fragments in log lines earlier in stderr,
         # so we find the last balanced JSON block.
-        json_str = self._extract_json_from_stderr(result.stderr)
+        json_str = self._extract_json_from_stderr(stderr_str)
         if json_str is None:
             raise RuntimeError("loudnorm did not produce JSON output")
 

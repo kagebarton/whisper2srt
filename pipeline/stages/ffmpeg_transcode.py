@@ -1,15 +1,19 @@
 """FFmpeg transcode stage: transcode WAV stems to M4A (AAC).
 
-Ported from cancel_separator/stages/ffmpeg_transcode.py.
-Removes cancel logic, reads AAC params from config, drops ctx from _transcode.
+Writes transcoded files to ctx.tmp_dir first, then moves them to the
+final output directory only after both transcodes succeed — preventing
+orphan files on cancellation.
+
+Uses run_ffmpeg() from _ffmpeg_helpers for cancellation support.
 """
 
 import logging
-import subprocess
+import shutil
 from pathlib import Path
 
 from pipeline.config import PipelineConfig
-from pipeline.context import StageContext
+from pipeline.context import Phase, StageContext
+from pipeline.stages._ffmpeg_helpers import run_ffmpeg
 from pipeline.stages.base import BaseStage
 
 logger = logging.getLogger(__name__)
@@ -30,45 +34,47 @@ class FFmpegTranscodeStage(BaseStage):
         if not vocal_wav or not instrumental_wav:
             raise RuntimeError(f"[{self.name}] Missing stem WAVs in artifacts")
 
-        video = ctx.song_path
-        vocal_dir = video.parent / "vocal"
-        nonvocal_dir = video.parent / "nonvocal"
-        vocal_dir.mkdir(exist_ok=True)
-        nonvocal_dir.mkdir(exist_ok=True)
+        song = ctx.song_path
 
-        vocal_out = vocal_dir / f"{video.stem}---vocal.m4a"
-        nonvocal_out = nonvocal_dir / f"{video.stem}---nonvocal.m4a"
+        # Final destinations (created lazily; only after both transcodes succeed)
+        final_vocal = song.parent / "vocal" / f"{song.stem}---vocal.m4a"
+        final_nonvocal = song.parent / "nonvocal" / f"{song.stem}---nonvocal.m4a"
+
+        # Write transcoded output INSIDE tmp_dir so a cancel during either
+        # transcode leaves the partial file in tmp_dir (wiped by the
+        # orchestrator's shutil.rmtree).
+        tmp_vocal = ctx.tmp_dir / final_vocal.name
+        tmp_nonvocal = ctx.tmp_dir / final_nonvocal.name
 
         logger.info(f"[{self.name}] Transcoding vocal: {Path(vocal_wav).name}")
-        self._transcode(vocal_wav, vocal_out)
+        self._transcode(vocal_wav, tmp_vocal, ctx)
+
+        # Cancel between the two transcodes is caught here (outside any
+        # activity scope after the first run_ffmpeg exits).
+        if ctx.cancel is not None:
+            ctx.cancel.check_cancelled()
 
         logger.info(f"[{self.name}] Transcoding instrumental: {Path(instrumental_wav).name}")
-        self._transcode(instrumental_wav, nonvocal_out)
+        self._transcode(instrumental_wav, tmp_nonvocal, ctx)
 
-        ctx.artifacts["vocal_m4a"] = vocal_out
-        ctx.artifacts["nonvocal_m4a"] = nonvocal_out
+        # Both transcodes succeeded — promote tmp files to final locations.
+        final_vocal.parent.mkdir(exist_ok=True)
+        final_nonvocal.parent.mkdir(exist_ok=True)
+        shutil.move(str(tmp_vocal), str(final_vocal))
+        shutil.move(str(tmp_nonvocal), str(final_nonvocal))
+
+        ctx.artifacts["vocal_m4a"] = final_vocal
+        ctx.artifacts["nonvocal_m4a"] = final_nonvocal
         logger.info(f"[{self.name}] Transcode complete")
 
-    def _transcode(self, wav_path: Path, output_path: Path) -> None:
+    def _transcode(self, wav_path: Path, output_path: Path, ctx: StageContext) -> None:
         cmd = [
             "ffmpeg",
             "-y",
-            "-threads",
-            self._config.ffmpeg_threads,
-            "-i",
-            str(wav_path),
-            "-c:a",
-            "aac",
-            "-q:a",
-            self._config.aac_quality,
+            "-threads", self._config.ffmpeg_threads,
+            "-i", str(wav_path),
+            "-c:a", "aac",
+            "-q:a", self._config.aac_quality,
             str(output_path),
         ]
-        result = subprocess.run(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg transcode failed (exit code {result.returncode})")
+        run_ffmpeg(cmd, ctx, Phase.TRANSCODE)

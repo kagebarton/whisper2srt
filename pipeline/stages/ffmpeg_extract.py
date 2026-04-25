@@ -1,15 +1,15 @@
 """FFmpeg extract stage: extract audio from video to WAV.
 
 Ported from cancel_separator/stages/ffmpeg_extract.py.
-Removes cancel logic, uses subprocess.run(), reads ffmpeg_threads from config.
+Uses run_ffmpeg() from _ffmpeg_helpers for cancellation support.
 """
 
 import logging
-import subprocess
 from pathlib import Path
 
 from pipeline.config import PipelineConfig
-from pipeline.context import StageContext
+from pipeline.context import Phase, StageContext
+from pipeline.stages._ffmpeg_helpers import run_ffmpeg
 from pipeline.stages.base import BaseStage
 
 logger = logging.getLogger(__name__)
@@ -28,29 +28,16 @@ class FFmpegExtractStage(BaseStage):
         cmd = [
             "ffmpeg",
             "-y",
-            "-threads",
-            self._config.ffmpeg_threads,
-            "-i",
-            str(ctx.song_path),
+            "-threads", self._config.ffmpeg_threads,
+            "-i", str(ctx.song_path),
             "-vn",
-            "-ac",
-            "2",
-            "-ar",
-            "44100",
-            "-sample_fmt",
-            "s16",
+            "-ac", "2",
+            "-ar", "44100",
+            "-sample_fmt", "s16",
             str(wav_out),
         ]
         logger.info(f"[{self.name}] Extracting audio: {ctx.song_path.name}")
-        result = subprocess.run(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg extract failed (exit code {result.returncode})")
+        run_ffmpeg(cmd, ctx, Phase.EXTRACT)
 
         ctx.artifacts["extracted_wav"] = wav_out
         logger.info(f"[{self.name}] Extract complete: {wav_out.name}")

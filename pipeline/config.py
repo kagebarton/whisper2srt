@@ -33,7 +33,7 @@ class PipelineConfig:
     whisper_compute_type: str = "int8"
 
     # --- Intermediate files directory ---
-    intermediate_dir: str = ""  # Empty = system temp dir
+    intermediate_dir: str = "/mnt/ramdisk"  # Empty = system temp dir
 
     # --- Loudnorm targets ---
     loudnorm_target_i: float = -24.0  # Target integrated loudness (LUFS)

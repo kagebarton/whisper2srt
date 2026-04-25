@@ -1,13 +1,16 @@
-"""Whisper worker: in-process stable-ts worker with per-encode-pass cancellation.
+"""Whisper worker: in-process stable-ts worker with per-encoder-pass cancellation.
 
-Adapted from cancel_whisper/workers/cancelable_whisper_worker.py.
-Key change: align_and_refine() no longer clears the cancel_event between
-align and refine phases — a single cancel signal propagates through both.
+Adapted from cancel_tests/whisper/whisper_worker.py (hook-based approach).
+Key differences from the pipeline variant:
+- Uses register_forward_pre_hook() on model.encoder instead of monkey-patching
+  model.encode() — whisper.model.Whisper has no .encode() method.
+- align_and_refine() does NOT clear the cancel_event between phases — a single
+  cancel signal propagates through both (production: whole song is discarded).
 
 Unlike the StemWorker (which runs audio-separator in a subprocess), this
 worker runs stable-ts in the same process. Cancellation is done by
-monkey-patching model.encode() to check a threading.Event before each
-encoder forward pass.
+registering a forward pre-hook on the encoder nn.Module to check a
+threading.Event before each encoder forward pass.
 
 The model is loaded once and stays loaded across jobs. If alignment is
 cancelled, the exception unwinds cleanly and the model weights survive.
@@ -31,24 +34,26 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import torch
+
 from pipeline.config import WhisperModelConfig
 
 logger = logging.getLogger(__name__)
 
 
-class _CancelledInsideEncode(Exception):
-    """Raised inside the patched encode() when cancel is detected.
+class _CancelledInsideEncoder(Exception):
+    """Raised by the forward pre-hook when cancel is detected.
 
     This exception unwinds through:
-    encode() → inference_func() → _compute_timestamps() → while loop →
-    Aligner.align() → model.align()
+    pre_hook() → nn.Module.__call__() → encoder.forward() → inference_func() →
+    _compute_timestamps() → while loop → Aligner.align() → model.align()
     or:
-    encode() → inference_func() → Refiner.get_prob() → while loop →
-    Refiner._refine() → Refiner.refine() → model.refine()
+    pre_hook() → nn.Module.__call__() → encoder.forward() → inference_func() →
+    Refiner.get_prob() → while loop → Refiner._refine() → model.refine()
 
-    The model weights survive because they're attributes on the WhisperModel
-    instance (model.model is a CTranslate2 model stored on GPU/CPU), not
-    stack locals that get destroyed during unwinding.
+    The model weights survive because they're nn.Parameter attributes on the
+    Whisper nn.Module (stored on GPU/CPU), not stack locals that get destroyed
+    during unwinding.
     """
 
 
@@ -57,12 +62,12 @@ class AlignmentCancelledError(Exception):
 
 
 class WhisperWorker:
-    """In-process stable-ts worker with per-encode-pass cancellation.
+    """In-process stable-ts worker with per-encoder-pass cancellation via hooks.
 
     Unlike StemWorker (which runs audio-separator in a subprocess), this
     worker runs stable-ts in the same process. Cancellation is done by
-    monkey-patching model.encode() to check a threading.Event before each
-    encoder forward pass.
+    registering a forward pre-hook on model.encoder (an nn.Module) to check
+    a threading.Event before each encoder forward pass.
 
     The model is loaded once and stays loaded across jobs. If alignment is
     cancelled, the exception unwinds cleanly and the model weights survive.
@@ -81,6 +86,7 @@ class WhisperWorker:
         self._config = config or WhisperModelConfig()
         self._model = None
         self._model_loaded = False
+        self._encoder_module = None
         self._audioloader_patched = False
 
     @property
@@ -88,18 +94,17 @@ class WhisperWorker:
         return self._model is not None and self._model_loaded
 
     def load_model(self) -> None:
-        """Load the faster-whisper model via stable-ts.
+        """Load the PyTorch whisper model via stable-ts.
 
         This is expensive (~10-30s) and should be called once at startup.
-        Also monkey-patches AudioLoader to suppress FFmpeg broken-pipe
-        stderr on cancellation.
+        Also caches the encoder nn.Module reference and patches AudioLoader
+        to suppress FFmpeg broken-pipe stderr on cancellation.
         """
         if self._model is not None:
             logger.info("Model already loaded — skipping")
             return
 
         import stable_whisper
-        import torch
 
         device = self._config.device
         if device == "auto":
@@ -114,9 +119,20 @@ class WhisperWorker:
             device=device,
         )
 
+        # Cache the encoder nn.Module for hook registration.
+        # stable_whisper.load_model() returns whisper.model.Whisper directly —
+        # the encoder is at self._model.encoder, not self._model.model.encoder.
+        self._encoder_module = self._model.encoder
+        if not isinstance(self._encoder_module, torch.nn.Module):
+            logger.warning(
+                f"self._model.encoder is {type(self._encoder_module).__name__}, "
+                f"not nn.Module — cancellation will degrade to waiting for the "
+                f"current encode pass to return"
+            )
+
         elapsed = time.time() - start
         self._model_loaded = True
-        logger.info(f"Whisper model loaded in {elapsed:.1f}s")
+        logger.info(f"Whisper model loaded in {elapsed:.1f}s (device={device})")
 
         # Patch AudioLoader to redirect FFmpeg stderr to /dev/null so that
         # killed FFmpeg processes don't produce "Broken pipe" messages.
@@ -231,7 +247,7 @@ class WhisperWorker:
     def _terminate_orphaned_audioloaders(self) -> None:
         """Terminate any orphaned AudioLoader FFmpeg subprocesses.
 
-        When _CancelledInsideEncode unwinds through Aligner.align(), the
+        When _CancelledInsideEncoder unwinds through Aligner.align(), the
         normal cleanup path (self.audio_loader.terminate()) is skipped. The
         AudioLoader still holds a reference to the FFmpeg subprocess. We walk
         the gc to find these orphaned instances and terminate them explicitly.
@@ -302,58 +318,43 @@ class WhisperWorker:
         if self._model is None:
             raise RuntimeError("Model not loaded — call load_model() first")
 
-        # If no cancel event, just run alignment normally
-        if cancel_event is None:
-            return self._model.align(
-                str(vocal_path),
-                lyrics_text,
-                language=self._config.language,
-                vad=self._config.vad,
-                vad_threshold=self._config.vad_threshold,
-                suppress_silence=self._config.suppress_silence,
-                suppress_word_ts=self._config.suppress_word_ts,
-                only_voice_freq=self._config.only_voice_freq,
-            )
+        align_kwargs = dict(
+            language=self._config.language,
+            vad=self._config.vad,
+            vad_threshold=self._config.vad_threshold,
+            suppress_silence=self._config.suppress_silence,
+            suppress_word_ts=self._config.suppress_word_ts,
+            only_voice_freq=self._config.only_voice_freq,
+        )
 
-        # --- Monkey-patch model.encode() with cancel check ---
-        model = self._model
-        original_encode = model.encode
+        if cancel_event is None:
+            return self._model.align(str(vocal_path), lyrics_text, **align_kwargs)
+
+        if self._encoder_module is None:
+            logger.warning("Encoder module not cached — running without cancel check")
+            return self._model.align(str(vocal_path), lyrics_text, **align_kwargs)
+
+        # --- Register forward pre-hook on encoder for cancel check ---
         encode_counter = [0]
 
-        def cancelable_encode(*args, **kwargs):
-            # Check cancel BEFORE running the encoder (not after)
-            # This means we cancel between iterations, not mid-inference
+        def cancel_pre_hook(module, inputs):
             if cancel_event.is_set():
                 logger.info(
-                    f"Cancel detected before encode pass #{encode_counter[0] + 1} — aborting"
+                    f"Cancel detected before align pass #{encode_counter[0] + 1} — aborting"
                 )
-                raise _CancelledInsideEncode()
-
-            result = original_encode(*args, **kwargs)
+                raise _CancelledInsideEncoder()
             encode_counter[0] += 1
-            return result
 
-        model.encode = cancelable_encode
-        logger.debug("Patched model.encode() with per-pass cancel check")
+        handle = self._encoder_module.register_forward_pre_hook(cancel_pre_hook)
+        logger.debug("Registered forward pre-hook on encoder for align")
 
         try:
-            result = self._model.align(
-                str(vocal_path),
-                lyrics_text,
-                language=self._config.language,
-                vad=self._config.vad,
-                vad_threshold=self._config.vad_threshold,
-                suppress_silence=self._config.suppress_silence,
-                suppress_word_ts=self._config.suppress_word_ts,
-                only_voice_freq=self._config.only_voice_freq,
-            )
-            return result
-        except _CancelledInsideEncode:
+            return self._model.align(str(vocal_path), lyrics_text, **align_kwargs)
+        except _CancelledInsideEncoder:
             logger.info(
                 f"Alignment cancelled after {encode_counter[0]} encode passes "
                 f"— model still loaded"
             )
-            # Clean up orphaned AudioLoader FFmpeg subprocess
             self._terminate_orphaned_audioloaders()
             _clear_gpu_state()
             raise AlignmentCancelledError(
@@ -361,12 +362,11 @@ class WhisperWorker:
                 f"(model still loaded)"
             )
         finally:
-            # Always restore original encode() — even on cancel/error
-            model.encode = original_encode
-            logger.debug(
-                f"Restored original model.encode() "
-                f"(processed {encode_counter[0]} encode passes before exit)"
-            )
+            try:
+                handle.remove()
+            except Exception:
+                pass
+            logger.debug(f"Removed encoder hook ({encode_counter[0]} encode passes)")
 
     def refine(
         self,
@@ -391,48 +391,39 @@ class WhisperWorker:
         if self._model is None:
             raise RuntimeError("Model not loaded — call load_model() first")
 
-        if cancel_event is None:
-            return self._model.refine(
-                str(vocal_path),
-                result,
-                steps=self._config.refine_steps,
-                word_level=self._config.refine_word_level,
-            )
+        refine_kwargs = dict(
+            steps=self._config.refine_steps,
+            word_level=self._config.refine_word_level,
+        )
 
-        # --- Monkey-patch model.encode() with cancel check ---
-        model = self._model
-        original_encode = model.encode
+        if cancel_event is None:
+            return self._model.refine(str(vocal_path), result, **refine_kwargs)
+
+        if self._encoder_module is None:
+            logger.warning("Encoder module not cached — running without cancel check")
+            return self._model.refine(str(vocal_path), result, **refine_kwargs)
+
+        # --- Register forward pre-hook on encoder for cancel check ---
         encode_counter = [0]
 
-        def cancelable_encode(*args, **kwargs):
+        def cancel_pre_hook(module, inputs):
             if cancel_event.is_set():
                 logger.info(
                     f"Cancel detected before refine pass #{encode_counter[0] + 1} — aborting"
                 )
-                raise _CancelledInsideEncode()
-
-            result = original_encode(*args, **kwargs)
+                raise _CancelledInsideEncoder()
             encode_counter[0] += 1
-            return result
 
-        model.encode = cancelable_encode
-        logger.debug("Patched model.encode() with per-pass cancel check (refine)")
+        handle = self._encoder_module.register_forward_pre_hook(cancel_pre_hook)
+        logger.debug("Registered forward pre-hook on encoder for refine")
 
         try:
-            refined = self._model.refine(
-                str(vocal_path),
-                result,
-                steps=self._config.refine_steps,
-                word_level=self._config.refine_word_level,
-            )
-            return refined
-        except _CancelledInsideEncode:
+            return self._model.refine(str(vocal_path), result, **refine_kwargs)
+        except _CancelledInsideEncoder:
             logger.info(
                 f"Refinement cancelled after {encode_counter[0]} encode passes "
                 f"— model still loaded"
             )
-            # Note: refine() uses prep_audio() not AudioLoader, so no FFmpeg
-            # subprocess to clean up. But we call it anyway for safety.
             self._terminate_orphaned_audioloaders()
             _clear_gpu_state()
             raise AlignmentCancelledError(
@@ -440,11 +431,11 @@ class WhisperWorker:
                 f"(model still loaded)"
             )
         finally:
-            model.encode = original_encode
-            logger.debug(
-                f"Restored original model.encode() "
-                f"(processed {encode_counter[0]} encode passes before exit)"
-            )
+            try:
+                handle.remove()
+            except Exception:
+                pass
+            logger.debug(f"Removed encoder hook ({encode_counter[0]} encode passes)")
 
     def align_and_refine(
         self,
@@ -495,48 +486,40 @@ class WhisperWorker:
         if self._model is None:
             raise RuntimeError("Model not loaded — call load_model() first")
 
-        if cancel_event is None:
-            return self._model.transcribe(
-                str(vocal_path),
-                language=self._config.language,
-                vad=self._config.vad,
-                vad_threshold=self._config.vad_threshold,
-                suppress_silence=self._config.suppress_silence,
-                suppress_word_ts=self._config.suppress_word_ts,
-                only_voice_freq=self._config.only_voice_freq,
-                word_timestamps=True,
-            )
+        transcribe_kwargs = dict(
+            language=self._config.language,
+            vad=self._config.vad,
+            vad_threshold=self._config.vad_threshold,
+            suppress_silence=self._config.suppress_silence,
+            suppress_word_ts=self._config.suppress_word_ts,
+            only_voice_freq=self._config.only_voice_freq,
+            word_timestamps=True,
+        )
 
-        model = self._model
-        original_encode = model.encode
+        if cancel_event is None:
+            return self._model.transcribe(str(vocal_path), **transcribe_kwargs)
+
+        if self._encoder_module is None:
+            logger.warning("Encoder module not cached — running without cancel check")
+            return self._model.transcribe(str(vocal_path), **transcribe_kwargs)
+
+        # --- Register forward pre-hook on encoder for cancel check ---
         encode_counter = [0]
 
-        def cancelable_encode(*args, **kwargs):
+        def cancel_pre_hook(module, inputs):
             if cancel_event.is_set():
                 logger.info(
                     f"Cancel detected before transcribe pass #{encode_counter[0] + 1} — aborting"
                 )
-                raise _CancelledInsideEncode()
-            result = original_encode(*args, **kwargs)
+                raise _CancelledInsideEncoder()
             encode_counter[0] += 1
-            return result
 
-        model.encode = cancelable_encode
-        logger.debug("Patched model.encode() with per-pass cancel check (transcribe)")
+        handle = self._encoder_module.register_forward_pre_hook(cancel_pre_hook)
+        logger.debug("Registered forward pre-hook on encoder for transcribe")
 
         try:
-            result = self._model.transcribe(
-                str(vocal_path),
-                language=self._config.language,
-                vad=self._config.vad,
-                vad_threshold=self._config.vad_threshold,
-                suppress_silence=self._config.suppress_silence,
-                suppress_word_ts=self._config.suppress_word_ts,
-                only_voice_freq=self._config.only_voice_freq,
-                word_timestamps=True,
-            )
-            return result
-        except _CancelledInsideEncode:
+            return self._model.transcribe(str(vocal_path), **transcribe_kwargs)
+        except _CancelledInsideEncoder:
             logger.info(
                 f"Transcription cancelled after {encode_counter[0]} encode passes "
                 f"— model still loaded"
@@ -548,11 +531,11 @@ class WhisperWorker:
                 f"(model still loaded)"
             )
         finally:
-            model.encode = original_encode
-            logger.debug(
-                f"Restored original model.encode() "
-                f"(processed {encode_counter[0]} encode passes before exit)"
-            )
+            try:
+                handle.remove()
+            except Exception:
+                pass
+            logger.debug(f"Removed encoder hook ({encode_counter[0]} encode passes)")
 
     def transcribe_and_refine(
         self,
@@ -579,6 +562,7 @@ class WhisperWorker:
         if self._model is not None:
             del self._model
             self._model = None
+            self._encoder_module = None
             self._model_loaded = False
             _clear_gpu_cache()
             logger.info("Whisper model unloaded")
@@ -587,7 +571,7 @@ class WhisperWorker:
 def _clear_gpu_state() -> None:
     """Clear intermediate GPU state after a cancelled operation.
 
-    After _CancelledInsideEncode unwinds, there should be no leftover GPU
+    After _CancelledInsideEncoder unwinds, there should be no leftover GPU
     state from the interrupted encoder pass (CTranslate2 manages its own
     memory internally). But we clear the PyTorch cache as a safety net.
     """

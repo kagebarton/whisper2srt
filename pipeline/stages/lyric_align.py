@@ -10,6 +10,12 @@ In both modes the same ASS and SRT generators are used. The difference is
 how line objects are built: alignment pairs words to predefined lyric lines
 by count; transcription uses stable-ts segments directly as lines.
 
+Each model call (align, transcribe, refine) is wrapped in its own
+cancellation activity scope (Phase.ALIGN / Phase.TRANSCRIBE / Phase.REFINE).
+ASS/SRT are written to ctx.tmp_dir first and moved to the final output
+directory only after both writes succeed — preventing orphan files on
+cancellation.
+
 ASS generation ported from snippets/stable_align.py, but reads all
 styling/timing parameters from PipelineConfig instead of module-level
 constants.
@@ -17,14 +23,15 @@ constants.
 
 import datetime
 import logging
+import shutil
 from pathlib import Path
 
 import srt
 
 from pipeline.config import PipelineConfig
-from pipeline.context import StageContext
+from pipeline.context import Phase, PipelineCancelled, SetEvent, StageContext
 from pipeline.stages.base import BaseStage
-from pipeline.workers.whisper_worker import WhisperWorker
+from pipeline.workers.whisper_worker import AlignmentCancelledError, WhisperWorker
 
 logger = logging.getLogger(__name__)
 
@@ -45,26 +52,20 @@ class LyricAlignStage(BaseStage):
         if vocal_wav is None:
             raise RuntimeError(f"[{self.name}] No vocal_wav in artifacts")
 
-        # Determine output paths
-        song_dir = ctx.song_path.parent
-        karaoke_dir = song_dir / "karaoke"
-        karaoke_dir.mkdir(exist_ok=True)
-        ass_out = karaoke_dir / f"{ctx.song_path.stem}.ass"
-        subtitles_dir = song_dir / "subtitles"
-        subtitles_dir.mkdir(exist_ok=True)
-        srt_out = subtitles_dir / f"{ctx.song_path.stem}.srt"
-
         if lyrics_path is not None:
-            # --- Alignment mode ---
+            # --- Alignment mode: ALIGN → REFINE ---
             lyrics_text, lyrics_format = self._load_lyrics(lyrics_path)
             ctx.artifacts["lyrics_text"] = lyrics_text
             ctx.artifacts["lyrics_format"] = lyrics_format
 
             logger.info(f"[{self.name}] Aligning lyrics to vocal stem: {Path(vocal_wav).name}")
-            result = self._worker.align_and_refine(
-                vocal_path=vocal_wav,
-                lyrics_text=lyrics_text,
-                cancel_event=None,
+            result = _model_call(
+                ctx, Phase.ALIGN,
+                lambda: self._worker.align(
+                    vocal_path=vocal_wav,
+                    lyrics_text=lyrics_text,
+                    cancel_event=ctx.cancel.event if ctx.cancel else None,
+                ),
             )
 
             words = self._extract_words(result)
@@ -73,29 +74,84 @@ class LyricAlignStage(BaseStage):
 
             # SRT only when input was .txt (no timestamps to preserve from .srt input)
             write_srt = lyrics_format == "txt"
-        else:
-            # --- Transcription mode ---
-            logger.info(f"[{self.name}] Transcribing vocal stem: {Path(vocal_wav).name}")
-            result = self._worker.transcribe_and_refine(
-                vocal_path=vocal_wav,
-                cancel_event=None,
+
+            result = _model_call(
+                ctx, Phase.REFINE,
+                lambda: self._worker.refine(
+                    vocal_path=vocal_wav,
+                    result=result,
+                    cancel_event=ctx.cancel.event if ctx.cancel else None,
+                ),
             )
+        else:
+            # --- Transcription mode: TRANSCRIBE → (regroup) → REFINE ---
+            logger.info(f"[{self.name}] Transcribing vocal stem: {Path(vocal_wav).name}")
+            result = _model_call(
+                ctx, Phase.TRANSCRIBE,
+                lambda: self._worker.transcribe(
+                    vocal_path=vocal_wav,
+                    cancel_event=ctx.cancel.event if ctx.cancel else None,
+                ),
+            )
+
+            # regroup is fast (CPU-bound, milliseconds) and runs OUTSIDE any
+            # activity scope. It's not cancellable. A cancel arriving during
+            # regroup is caught by REFINE's activity() on entry via the sticky
+            # `cancelled` flag.
+            if self._config.whisper_regroup:
+                result.regroup(self._config.whisper_regroup)
 
             line_objects = self._segments_to_line_objects(result)
             write_srt = True
 
-        # Generate ASS
-        ass_content = self._generate_ass(line_objects)
-        ass_out.write_text(ass_content, encoding="utf-8")
-        ctx.artifacts["ass_file"] = ass_out
-        logger.info(f"[{self.name}] ASS written: {ass_out}")
+            result = _model_call(
+                ctx, Phase.REFINE,
+                lambda: self._worker.refine(
+                    vocal_path=vocal_wav,
+                    result=result,
+                    cancel_event=ctx.cancel.event if ctx.cancel else None,
+                ),
+            )
 
-        # Generate SRT
+        # Generate ASS and SRT strings (CPU-bound, not cancellable)
+        # -- but we still need to re-extract line_objects from the *refined*
+        # result.  The refine step may have adjusted word timestamps, so
+        # rebuild line_objects from the refined result.
+        if lyrics_path is not None:
+            words = self._extract_words(result)
+            lines = [line.strip() for line in lyrics_text.split("\n") if line.strip()]
+            line_objects = self._match_words_to_lines(words, lines)
+        else:
+            line_objects = self._segments_to_line_objects(result)
+
+        ass_content = self._generate_ass(line_objects)
+        srt_content = self._generate_srt(line_objects) if write_srt else None
+
+        # Write to tmp_dir first, then move to final destinations — prevents
+        # orphan files on cancellation (tmp_dir is cleaned by orchestrator).
+        tmp_ass = ctx.tmp_dir / f"{ctx.song_path.stem}.ass"
+        tmp_ass.write_text(ass_content, encoding="utf-8")
+
+        tmp_srt = None
         if write_srt:
-            srt_content = self._generate_srt(line_objects)
-            srt_out.write_text(srt_content, encoding="utf-8")
-            ctx.artifacts["srt_file"] = srt_out
-            logger.info(f"[{self.name}] SRT written: {srt_out}")
+            tmp_srt = ctx.tmp_dir / f"{ctx.song_path.stem}.srt"
+            tmp_srt.write_text(srt_content, encoding="utf-8")
+
+        # Promote to final locations
+        karaoke_dir = ctx.song_path.parent / "karaoke"
+        karaoke_dir.mkdir(exist_ok=True)
+        final_ass = karaoke_dir / tmp_ass.name
+        shutil.move(str(tmp_ass), str(final_ass))
+        ctx.artifacts["ass_file"] = final_ass
+        logger.info(f"[{self.name}] ASS written: {final_ass}")
+
+        if write_srt and tmp_srt is not None:
+            subtitles_dir = ctx.song_path.parent / "subtitles"
+            subtitles_dir.mkdir(exist_ok=True)
+            final_srt = subtitles_dir / tmp_srt.name
+            shutil.move(str(tmp_srt), str(final_srt))
+            ctx.artifacts["srt_file"] = final_srt
+            logger.info(f"[{self.name}] SRT written: {final_srt}")
 
     # --- Helpers ---
 
@@ -285,6 +341,22 @@ class LyricAlignStage(BaseStage):
             for i, line_obj in enumerate(line_objects, start=1)
         ]
         return srt.compose(subtitles)
+
+
+def _model_call(ctx, phase: Phase, fn):
+    """Wrap a single model call in an activity scope (or run it bare
+    when ctx.cancel is None).  Translates AlignmentCancelledError to
+    PipelineCancelled so the orchestrator only needs to catch one
+    exception type.
+    """
+    if ctx.cancel is None:
+        return fn()
+    cancel_event = ctx.cancel.event
+    try:
+        with ctx.cancel.activity(phase, SetEvent(cancel_event)):
+            return fn()
+    except AlignmentCancelledError:
+        raise PipelineCancelled(phase)
 
 
 def _seconds_to_ass_time(seconds: float) -> str:

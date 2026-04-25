@@ -145,6 +145,10 @@ class StemWorker:
         if rq is None or js is None or proc is None:
             raise WorkerDiedError("Stem worker is not running")
 
+        # Clear any stale cancel signal from a prior job's leaked
+        # cancel-forwarder daemon thread before starting this job.
+        self._drain_cancel_pipe()
+
         js.send((str(wav_path), str(output_dir)))
 
         # Forward threading.Event → cancel Pipe via a daemon thread
