@@ -2,14 +2,24 @@
 
 Cloned and adapted from pipeline/stages/lyric_align.py. Two public
 functions, no class.
+
+Speaker labels are generalised from single-character letters (A/B/C)
+to arbitrary strings (e.g. "Brian", "AJ").  ASS style names are
+sanitised to ASCII-safe identifiers (e.g. ``Karaoke_Brian``,
+``Karaoke_AJ``).  Letter-fallback labels and named singers share the
+same colour palette, assigned in first-appearance order.
 """
 
 import datetime
 import logging
+import re
 
 import srt
 
 logger = logging.getLogger(__name__)
+
+# Pattern for sanitising speaker labels into safe ASS style-name tokens
+_UNSAFE_CHAR_RE = re.compile(r"\W")
 
 
 def generate_srt(line_objects, cfg):
@@ -93,6 +103,16 @@ _ENSEMBLE_STYLE = "Karaoke_ensemble"
 _ENSEMBLE_COLOR = "&H00FFFFFF&"  # white — no speaker attribution
 
 
+def _safe_style_name(label: str) -> str:
+    """Sanitise a speaker label into an ASCII-safe ASS style name component.
+
+    ``re.sub(r'\\W', '_', label)`` — e.g. ``O'Brien`` → ``O_Brien``.
+    If the result collides with a previously seen name, append a numeric
+    suffix.
+    """
+    return _UNSAFE_CHAR_RE.sub("_", label)
+
+
 def _generate_styles(cfg, present, single_speaker, has_ensemble=False):
     """Generate one Style row per speaker, or a single Karaoke style for single-speaker.
 
@@ -112,11 +132,17 @@ def _generate_styles(cfg, present, single_speaker, has_ensemble=False):
             f"{cfg.margin_left},{cfg.margin_right},{cfg.margin_vertical},1"
         )
     else:
-        for letter in present:
-            idx = cfg.speaker_letters.index(letter)
-            primary = cfg.speaker_colors[idx]
+        # Assign colours by first-appearance order into the palette.
+        # Names and letter-fallback labels share the same palette.
+        for color_idx, label in enumerate(present):
+            primary = (
+                cfg.speaker_colors[color_idx]
+                if color_idx < len(cfg.speaker_colors)
+                else cfg.speaker_colors[-1]
+            )
+            safe = _safe_style_name(label)
             rows.append(
-                f"Style: Karaoke_{letter},{cfg.font_name},{cfg.font_size},"
+                f"Style: Karaoke_{safe},{cfg.font_name},{cfg.font_size},"
                 f"{primary},{cfg.secondary_color},"
                 f"{cfg.outline_color},{cfg.back_color},"
                 f"0,0,0,0,100,100,0,0,1,"
@@ -155,7 +181,7 @@ def _generate_ass_events(line_objects, cfg, single_speaker):
         elif speaker is None:
             style = _ENSEMBLE_STYLE
         else:
-            style = f"Karaoke_{speaker}"
+            style = f"Karaoke_{_safe_style_name(speaker)}"
 
         # Pad the event window around the sung word boundaries
         event_start = max(0.0, words[0]["start"] - cfg.line_lead_in_cs / 100.0)
@@ -217,12 +243,21 @@ def _generate_ass_events(line_objects, cfg, single_speaker):
 
 
 def _speaker_presence(line_objects):
-    """Return (present_letters, has_ensemble) for a list of line objects.
+    """Return (present_labels, has_ensemble) for a list of line objects.
 
-    present_letters: sorted list of non-None speaker letters that appear.
+    present_labels: list of non-None speaker labels in **first-appearance
+    order** (not sorted). Named singers and letter-fallback labels are
+    treated identically.
+
     has_ensemble: True if any line has speaker=None (overlap region).
     """
-    present = sorted({l["speaker"] for l in line_objects if l["speaker"] is not None})
+    seen = set()
+    present = []
+    for line in line_objects:
+        s = line["speaker"]
+        if s is not None and s not in seen:
+            seen.add(s)
+            present.append(s)
     has_ensemble = any(l["speaker"] is None for l in line_objects)
     return present, has_ensemble
 

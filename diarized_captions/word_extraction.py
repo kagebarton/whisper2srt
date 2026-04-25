@@ -9,6 +9,8 @@ from pathlib import Path
 
 import srt
 
+from diarized_captions.genius import parse_genius_sections
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,6 +29,29 @@ def load_lyrics(lyrics_path: Path) -> tuple:
     else:
         lyrics_text = lyrics_path.read_text(encoding="utf-8")
         return lyrics_text, "txt"
+
+
+def load_genius_lyrics(lyrics_path: Path) -> tuple:
+    """Return (lyrics_text, genius_lines) for a Genius-formatted lyrics file.
+
+    Calls ``parse_genius_sections`` on the raw file text and also returns
+    a flattened plain-text version (headers stripped) so whisper alignment
+    still works.  The flattened text preserves the same non-blank lyric
+    lines in the same order as the genius_lines list.
+
+    Returns:
+        (plain_text, genius_lines) where plain_text is a newline-joined
+        string of lyric lines (no headers, no blank lines) and
+        genius_lines is the output of ``parse_genius_sections``.
+    """
+    raw_text = lyrics_path.read_text(encoding="utf-8")
+    genius_lines = parse_genius_sections(raw_text)
+    # Flatten: headers are already consumed by the parser; reconstruct
+    # a plain-text version from the parsed line dicts so whisper
+    # alignment sees the exact same lines.
+    plain_lines = [gl["text"] for gl in genius_lines]
+    plain_text = "\n".join(plain_lines)
+    return plain_text, genius_lines
 
 
 def extract_words(result) -> list:
