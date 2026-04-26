@@ -14,11 +14,12 @@ class WhisperModelConfig:
     vad: bool = True
     vad_threshold: float = 0.25
     suppress_silence: bool = True
-    suppress_word_ts: bool = True
-    only_voice_freq: bool = True
-    refine_steps: str = "s"
-    refine_word_level: bool = False
+    suppress_word_ts: bool = False
+    only_voice_freq: bool = False
+    refine_steps: str = "se"
+    refine_word_level: bool = True
     regroup: str = ""
+    condition_on_previous_text: bool = False
 
 
 @dataclass
@@ -45,11 +46,12 @@ class PipelineConfig:
     whisper_vad: bool = True
     whisper_vad_threshold: float = 0.25
     whisper_suppress_silence: bool = True
-    whisper_suppress_word_ts: bool = True
-    whisper_only_voice_freq: bool = True
-    whisper_refine_steps: str = "s"  # 's' = refine starts, 'e' = refine ends, 'se' = both
-    whisper_refine_word_level: bool = False
+    whisper_suppress_word_ts: bool = False
+    whisper_only_voice_freq: bool = False
+    whisper_refine_steps: str = "se"  # 's' = refine starts, 'e' = refine ends, 'se' = both
+    whisper_refine_word_level: bool = True
     whisper_regroup: str = ""
+    whisper_condition_on_previous_text: bool = False
 
     # --- ASS styling ---
     font_name: str = "Arial"

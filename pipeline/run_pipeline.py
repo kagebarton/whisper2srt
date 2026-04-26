@@ -45,6 +45,7 @@ def build_whisper_config(cfg: PipelineConfig) -> WhisperModelConfig:
         refine_steps=cfg.whisper_refine_steps,
         refine_word_level=cfg.whisper_refine_word_level,
         regroup=cfg.whisper_regroup,
+        condition_on_previous_text=cfg.whisper_condition_on_previous_text,
     )
 
 

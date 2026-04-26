@@ -493,6 +493,7 @@ class WhisperWorker:
             suppress_silence=self._config.suppress_silence,
             suppress_word_ts=self._config.suppress_word_ts,
             only_voice_freq=self._config.only_voice_freq,
+            condition_on_previous_text=self._config.condition_on_previous_text,
             word_timestamps=True,
         )
 
