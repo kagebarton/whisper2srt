@@ -42,9 +42,9 @@ def _resolve_attribution(groups):
         - 1 group, "All"               → ensemble
         - 1 group, single name         → labeled
         - 1 group, named pair          → labeled with pair
-        - 2 groups, any is "All"       → ensemble
-        - 2 named groups (no "All")    → label with first group
-        - 3+ groups                    → ensemble
+        - 2+ groups, any is "All"      → ensemble
+        - 2+ named groups              → ensemble
+        - 1 group                      → label from it
     """
     if groups is None:
         return None, None, True
@@ -53,14 +53,14 @@ def _resolve_attribution(groups):
     if group_count == 0:
         return None, None, True
 
-    if group_count >= 3:
+    if group_count >= 2:
         return None, None, True
 
     # Any group is "All" → ensemble
     if any(g == ["All"] for g in groups):
         return None, None, True
 
-    # 1 or 2 fully-named groups — label from first group
+    # Exactly 1 fully-named group — label from it
     return _resolve_first_group(groups[0])
 
 
