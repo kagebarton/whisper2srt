@@ -312,3 +312,74 @@ class TestTruncateSpeakerLabel:
 
     def test_triple_group(self):
         assert truncate_speaker_label("A & B & C") == "A & B & C"
+
+
+# ---------------------------------------------------------------------------
+# Section carry-forward
+# ---------------------------------------------------------------------------
+
+
+class TestSectionCarryForward:
+    def test_bare_chorus_inherits_labeled_chorus(self):
+        """[Chorus: Rumi] then [Chorus] → second chorus labeled Rumi."""
+        text = (
+            "[Chorus: Rumi]\nLine one\n"
+            "[Chorus]\nLine two\n"
+        )
+        lines = parse_genius_sections(text)
+        assert lines[0]["speaker_label"] == "Rumi"
+        assert lines[1]["speaker_label"] == "Rumi"
+        assert lines[1]["dominant_speaker"] == "Rumi"
+
+    def test_bare_chorus_inherits_ensemble_chorus(self):
+        """[Chorus: All] then [Chorus] → both ensemble."""
+        text = (
+            "[Chorus: All]\nLine one\n"
+            "[Chorus]\nLine two\n"
+        )
+        lines = parse_genius_sections(text)
+        assert lines[0]["is_ensemble"] is True
+        assert lines[1]["is_ensemble"] is True
+
+    def test_bare_section_no_prior_stays_ensemble(self):
+        """[Verse 3] with no prior 'Verse 3' → unlabeled (no carry-forward)."""
+        text = (
+            "[Verse 1: Brian]\nLine one\n"
+            "[Verse 3]\nLine two\n"
+        )
+        lines = parse_genius_sections(text)
+        assert lines[0]["speaker_label"] == "Brian"
+        assert lines[1]["speaker_label"] is None
+        assert lines[1]["is_ensemble"] is True
+
+    def test_carry_forward_updates_with_later_header(self):
+        """Second attribution for same section name updates carry-forward."""
+        text = (
+            "[Chorus: Rumi]\nFirst chorus\n"
+            "[Chorus: Jinu]\nSecond chorus\n"
+            "[Chorus]\nThird chorus\n"
+        )
+        lines = parse_genius_sections(text)
+        assert lines[0]["speaker_label"] == "Rumi"
+        assert lines[1]["speaker_label"] == "Jinu"
+        assert lines[2]["speaker_label"] == "Jinu"  # inherits most recent
+
+    def test_carry_forward_named_duet(self):
+        """[Bridge: Kevin & AJ] then [Bridge] → both labeled Kevin & AJ."""
+        text = (
+            "[Bridge: Kevin & AJ]\nLine one\n"
+            "[Bridge]\nLine two\n"
+        )
+        lines = parse_genius_sections(text)
+        assert lines[1]["speaker_label"] == "Kevin & AJ"
+        assert lines[1]["dominant_speaker"] == "Kevin"
+
+    def test_different_sections_dont_cross_carry(self):
+        """Carry-forward is per section name, not global."""
+        text = (
+            "[Chorus: Rumi]\nChorus line\n"
+            "[Bridge]\nBridge line\n"
+        )
+        lines = parse_genius_sections(text)
+        assert lines[0]["speaker_label"] == "Rumi"
+        assert lines[1]["speaker_label"] is None  # Bridge has no prior attribution

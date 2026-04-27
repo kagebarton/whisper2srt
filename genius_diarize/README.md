@@ -40,11 +40,14 @@ Tell me why
 | `[Bridge: Kevin & AJ]` | 1 group, named pair | Labeled **Kevin & AJ** |
 | `[Chorus: All]` | 1 group, "All" | Unlabeled (ensemble) |
 | `[Chorus: Nick, All]` | 2+ groups | Unlabeled (ensemble) |
-| `[Verse 1]` | No attribution | Unlabeled (ensemble) |
+| `[Chorus: Brian, AJ]` | 2+ named groups | Unlabeled (ensemble) |
+| `[Chorus]` after `[Chorus: Rumi]` | Bare repeat | Inherits **Rumi** |
+| `[Verse 3]` with no prior "Verse 3" | No attribution, no history | Unlabeled (ensemble) |
 
-Multi-group headers are treated as ensemble because line-to-group
-alignment within a section is unknown — guessing the dominant voice per
-line would be wrong as often as right.
+Multi-group headers (2+) are treated as ensemble because line-to-group
+alignment within a section is unknown. Bare section headers (no `:`)
+carry forward the attribution from the last time that exact section
+name appeared with explicit attribution.
 
 ## How it works
 

@@ -105,6 +105,7 @@ def parse_genius_sections(lyrics_text: str) -> list[dict]:
 
     current_section = ""
     current_groups = None  # None = no attribution yet
+    section_history: dict = {}  # section_name → last groups with attribution
 
     for line in lines:
         stripped = line.strip()
@@ -119,9 +120,12 @@ def parse_genius_sections(lyrics_text: str) -> list[dict]:
                 section_part, attr_part = bracket_content.split(":", 1)
                 current_section = section_part.strip()
                 current_groups = split_groups(attr_part.strip())
+                section_history[current_section] = current_groups
             else:
                 current_section = bracket_content.strip()
-                current_groups = None
+                # Carry forward attribution from the last time this exact
+                # section name appeared with explicit attribution.
+                current_groups = section_history.get(current_section, None)
             continue
 
         # Skip fully-parenthesized lines (e.g., ``(ad-lib)``)
