@@ -21,6 +21,9 @@ _HEADER_RE = re.compile(r"^\[([^\]]+)\]\s*$")
 # Regex to detect if the entire line is parenthesized
 _FULL_PAREN_RE = re.compile(r"^\((.+)\)$")
 
+# Strip inline backing-vocal parentheticals for whisper alignment
+_INLINE_PAREN_RE = re.compile(r"\s*\([^)]*\)")
+
 
 # ---------------------------------------------------------------------------
 # Attribution-rule resolver
@@ -89,7 +92,8 @@ def parse_genius_sections(lyrics_text: str) -> list[dict]:
     Each dict::
 
         {
-            "text": str,              # lyric text
+            "text": str,              # lyric text (display; includes parens)
+            "align_text": str,        # text with inline parens stripped (for whisper)
             "section": str,           # "Verse 1", "Chorus", ...
             "speaker_label": str|None,  # "Brian", "Kevin & AJ", or None
             "dominant_speaker": str|None,  # first individual name, or None
@@ -124,6 +128,13 @@ def parse_genius_sections(lyrics_text: str) -> list[dict]:
         if _FULL_PAREN_RE.match(stripped):
             continue
 
+        # Alignment text: strip inline backing-vocal parentheticals so
+        # whisper isn't asked to match "(Bye, bye)" or "(Yeah)" tokens
+        # that may be absent or overlapping in the vocal stem.
+        align_text = _INLINE_PAREN_RE.sub("", stripped).strip()
+        if not align_text:
+            continue  # entire content was parenthetical
+
         # Non-header, non-blank, non-paren — emit a GeniusLine
         speaker_label, dominant_speaker, is_ensemble = _resolve_attribution(
             current_groups
@@ -132,6 +143,7 @@ def parse_genius_sections(lyrics_text: str) -> list[dict]:
         result.append(
             {
                 "text": stripped,
+                "align_text": align_text,
                 "section": current_section,
                 "speaker_label": speaker_label,
                 "dominant_speaker": dominant_speaker,

@@ -138,7 +138,8 @@ def main():
         result = whisper_worker.align_and_refine(vocal_path, plain_text)
         words = extract_words(result)
         lyrics_lines = [g["text"] for g in genius_lines]
-        line_objects = match_words_to_lines(words, lyrics_lines)
+        align_lines = [g["align_text"] for g in genius_lines]
+        line_objects = match_words_to_lines(words, lyrics_lines, align_lines)
         reset_segment_first_flags(line_objects)
 
         # Guard: line_objects and genius_lines must agree in count

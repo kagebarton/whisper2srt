@@ -169,6 +169,51 @@ class TestParseGeniusSections:
 
 
 # ---------------------------------------------------------------------------
+# align_text field
+# ---------------------------------------------------------------------------
+
+
+class TestAlignText:
+    def test_no_parens_unchanged(self):
+        text = "[Verse 1: Brian]\nYou are my fire"
+        lines = parse_genius_sections(text)
+        assert lines[0]["align_text"] == "You are my fire"
+        assert lines[0]["text"] == "You are my fire"
+
+    def test_inline_paren_stripped_from_align(self):
+        text = "[Verse 1: Brian]\nBye, bye, bye (Bye, bye)"
+        lines = parse_genius_sections(text)
+        assert lines[0]["text"] == "Bye, bye, bye (Bye, bye)"
+        assert lines[0]["align_text"] == "Bye, bye, bye"
+
+    def test_leading_paren_stripped(self):
+        text = "[Verse 1: JC]\n(I) I'm doin' this tonight"
+        lines = parse_genius_sections(text)
+        assert lines[0]["align_text"] == "I'm doin' this tonight"
+
+    def test_multiple_inline_parens_stripped(self):
+        text = "[Chorus]\nTell me why (Don't wanna hear) (Oh yeah)"
+        lines = parse_genius_sections(text)
+        assert lines[0]["align_text"] == "Tell me why"
+
+    def test_entirely_paren_line_skipped(self):
+        """A line that is entirely parenthetical after stripping is dropped."""
+        text = "[Verse 1: Brian]\n(A) (B)\nYou are my fire"
+        lines = parse_genius_sections(text)
+        assert len(lines) == 1
+        assert lines[0]["text"] == "You are my fire"
+
+    def test_text_field_preserves_parens(self):
+        """The display text field always retains the original parens."""
+        text = "[Chorus: All]\nEveryone sings (yeah)\nTogether now"
+        lines = parse_genius_sections(text)
+        assert lines[0]["text"] == "Everyone sings (yeah)"
+        assert lines[0]["align_text"] == "Everyone sings"
+        assert lines[1]["text"] == "Together now"
+        assert lines[1]["align_text"] == "Together now"
+
+
+# ---------------------------------------------------------------------------
 # genius_singer_mode
 # ---------------------------------------------------------------------------
 

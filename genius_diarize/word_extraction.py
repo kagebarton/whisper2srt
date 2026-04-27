@@ -47,7 +47,7 @@ def load_genius_lyrics(lyrics_text: str) -> tuple:
         genius_lines is the output of parse_genius_sections.
     """
     genius_lines = parse_genius_sections(lyrics_text)
-    plain_lines = [gl["text"] for gl in genius_lines]
+    plain_lines = [gl["align_text"] for gl in genius_lines]
     plain_text = "\n".join(plain_lines)
     return genius_lines, plain_text
 
@@ -75,17 +75,27 @@ def extract_words(result) -> list:
     return all_words
 
 
-def match_words_to_lines(words: list, lines: list) -> list:
+def match_words_to_lines(words: list, lines: list, align_lines: list = None) -> list:
     """Assign aligned words to lyrics lines by count.
 
-    Count-based pairing: assumes the lyrics file has the same word
-    count and order as what stable-ts aligned.
+    Count-based pairing: assumes the lyrics file has the same word count
+    and order as what stable-ts aligned.
+
+    Args:
+        words: flat whisper word list from extract_words().
+        lines: display text per lyric line (may include inline parens).
+        align_lines: stripped text per lyric line used for word counting.
+            If None, falls back to lines. Pass genius_line["align_text"]
+            values here so inline parentheticals don't inflate the count.
     """
+    if align_lines is None:
+        align_lines = lines
+
     line_objects = []
     word_index = 0
 
-    for line in lines:
-        line_word_count = len(line.split())
+    for display_line, align_line in zip(lines, align_lines):
+        line_word_count = len(align_line.split())
         line_words = words[word_index : word_index + line_word_count]
         word_index += line_word_count
 
@@ -93,7 +103,7 @@ def match_words_to_lines(words: list, lines: list) -> list:
             continue
 
         line_obj = {
-            "text": line,
+            "text": display_line,
             "words": line_words,
             "start": line_words[0]["start"],
             "end": line_words[-1]["end"],
