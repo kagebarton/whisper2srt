@@ -1,0 +1,140 @@
+.custom-combobox {
+  position: relative;
+  display: inline-block;
+  width: 90%;
+}
+.custom-combobox-toggle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  margin-left: -1px;
+  padding: 0;
+}
+.custom-combobox-input {
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+}
+#notification {
+  margin-bottom: 0;
+}
+#brand {
+  margin-left: 0;
+}
+#menu {
+  margin-right: 0;
+}
+
+.control-box a,
+.control-box i[onclick],
+#vol-up,
+#vol-down {
+  color: var(--controls-link-color);
+}
+
+.control-box a:hover,
+.control-box i[onclick]:hover,
+#vol-up:hover,
+#vol-down:hover {
+  color: var(--controls-link-hover);
+}
+
+.pagination {
+  margin-bottom: 7px;
+}
+.pagination-page-info {
+  padding: 0;
+  width: 100%;
+  margin: 0.5em;
+  margin-left: 0;
+  font-size: 12px;
+}
+.pagination-list {
+  list-style: none !important;
+  margin-top: 0px !important;
+  margin-left: 0px !important;
+  margin-bottom: 0px !important;
+}
+.pagination-list li {
+  margin-top: 0px !important;
+}
+.pagination-previous,
+.pagination-next {
+  margin-top: 0px !important;
+  margin-bottom: 0px !important;
+}
+.pagination-page-info b {
+  color: white;
+  background-color: transparent;
+  font-size: 100%;
+}
+
+input {
+  /* prevents mobile zooming */
+  font-size: 16px !important;
+}
+
+/* Subtitle mode button styling */
+#subtitle-mode-section .buttons {
+  width: 100%;
+}
+
+#subtitle-mode-section .buttons .button {
+  flex: 1;
+}
+
+.subtitle-mode-btn {
+  background-color: var(--button-normal-bg) !important;
+  color: var(--button-normal-text) !important;
+  border-color: var(--button-normal-border) !important;
+  font-size: var(--controls-button-size) !important;
+  font-weight: var(--controls-button-weight) !important;
+}
+
+.subtitle-mode-btn:hover {
+  background-color: var(--button-hover-bg) !important;
+  color: var(--button-hover-text) !important;
+}
+
+.subtitle-mode-btn.is-selected {
+  background-color: var(--button-selected-bg) !important;
+  color: var(--button-selected-text) !important;
+  border-color: var(--button-selected-bg) !important;
+}
+
+.subtitle-mode-btn:disabled {
+  background-color: var(--button-disabled-bg) !important;
+  color: var(--button-disabled-text) !important;
+  border-color: var(--button-normal-border) !important;
+  cursor: not-allowed !important;
+  opacity: var(--button-disabled-opacity) !important;
+}
+
+table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.break-word {
+  overflow-wrap: break-word; /* Renamed property in CSS3 draft spec */
+  width: 100%;
+}
+
+body.hide-cursor * {
+  cursor: none !important;
+}
+
+/* Drag and drop highlight */
+.drag-chosen {
+  background-color: #3273dc !important;
+  opacity: 0.9;
+}
+
+/* Brief highlight after move action */
+.row-moved {
+  animation: highlight-fade 1.5s ease-out;
+}
+
+@keyframes highlight-fade {
+  0% { background-color: #3273dc; }
+  100% { background-color: transparent; }
+}

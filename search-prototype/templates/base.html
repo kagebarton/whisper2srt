@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html data-theme="dark">
+
+<head>
+  <title>{% block title %}PiKaraoke – Search Prototype{% endblock %}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script type="text/javascript" src="/static/jquery-3.7.1.min.js"></script>
+  <script src="/static/js.cookie-3.0.5.min.js"></script>
+  <link rel="stylesheet" href="/static/bulma.min.css">
+  <link rel="stylesheet" href="/static/bulma-dark.css">
+  <link rel="stylesheet" href="/static/custom.css">
+  <link rel="icon" type="image/png" href="/static/images/microphone.png">
+  <link rel="stylesheet" href="/static/fontello/css/fontello.css?v=2">
+
+  <script>
+    function showNotification(message, categoryClass, timeout=3000) {
+      $("#notification-alt").addClass(categoryClass)
+      $("#notification-alt div").text(message)
+      $("#notification-alt").fadeIn()
+      setTimeout(function () { $("#notification-alt").fadeOut() }, timeout)
+      setTimeout(function () { $("#notification-alt").removeClass(categoryClass) }, timeout + 750)
+    }
+
+    function setUserCookie(reload=false) {
+      var user = Cookies.get("user");
+      if (!user) {
+        let name = window.prompt("Please enter your name. This will show up next to the songs you queue up from this device.");
+        if (name) {
+          Cookies.set("user", name, { expires: 3650, path: '/' });
+        } else {
+          let rand = Math.random().toString(36).slice(2, 6).toUpperCase();
+          Cookies.set("user", `Anon-${rand}`, { expires: 3650 });
+        }
+        reload && location.reload();
+      }
+    }
+
+    function getUserCookie() {
+      return Cookies.get("user");
+    }
+
+    $(function () {
+      $("#notification-close").click(function () { $(".notification").hide(); });
+      $("#notification-alt").hide();
+
+      var currentPath = window.location.pathname;
+      if (currentPath === "/")          $("#home").addClass("is-active");
+      if (currentPath === "/search")    $("#search").addClass("is-active");
+
+      var currentUser = Cookies.get("user");
+      if (currentUser) {
+        $("#current-user span").text(currentUser);
+        $("#current-user").removeClass("is-hidden");
+      }
+    });
+  </script>
+
+  {% block scripts %}{% endblock %}
+  {% block styles %}{% endblock %}
+</head>
+
+<style>
+  .navbar-item > i { margin-right: 2px; }
+  .base-notification {
+    position: fixed;
+    width: 500px;
+    bottom: 5px;
+    left: 50%;
+    margin-left: -250px;
+    z-index: 20;
+  }
+  .current-user {
+    position: fixed;
+    padding: 3px;
+    bottom: 5px;
+    right: 10px;
+  }
+  tr:nth-child(even) { background-color: rgb(50, 55, 55); }
+  @media screen and (max-width: 1088px) {
+    .navbar-brand > .navbar-item > span { display: none; }
+    .base-notification { position: fixed; width: 100%; bottom: 5px; left: 0; margin-left: 0; }
+    body { min-height: 120vh; }
+    .navbar-menu.is-active { position: absolute; right: 0; }
+  }
+</style>
+
+<body>
+
+<div class="container" style="padding: 5px; max-width: 900px;">
+  <nav class="navbar" role="navigation" aria-label="main navigation">
+    <div class="navbar-brand" id="brand" style="padding-left: 10px">
+      <a id="home" class="navbar-item" href="/">
+        <i class="icon icon-home-2" title="Home"></i>
+        <span>Home</span>
+      </a>
+      <a id="search" class="navbar-item" href="/search">
+        <i class="icon icon-search-1" title="Search"></i>
+        <span>Search</span>
+      </a>
+      <a role="button" class="navbar-burger" aria-label="menu" aria-expanded="false">
+        <span aria-hidden="true"></span>
+        <span aria-hidden="true"></span>
+        <span aria-hidden="true"></span>
+      </a>
+    </div>
+    <div class="navbar-menu" id="menu">
+      <div class="navbar-end">
+        <a id="current-user" class="navbar-item is-hidden" href="#">
+          <i class="icon icon-mic-1" title="Current user"></i>
+          <span></span>
+        </a>
+        <span class="navbar-item has-text-grey is-size-7">prototype</span>
+      </div>
+    </div>
+  </nav>
+
+  <div id="notification-alt" class="notification base-notification" style="display: none">
+    <button id="notification-close" class="delete"></button>
+    <div class="flash"></div>
+  </div>
+
+  <div class="box" style="margin-top: 5px;">
+    <header class="title">
+      {% block header %}{% endblock %}
+    </header>
+    <div class="content">
+      {% block content %}{% endblock %}
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

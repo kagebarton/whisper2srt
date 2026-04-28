@@ -1,0 +1,763 @@
+{% extends 'base.html' %}
+
+{% block scripts %}
+<link href="/static/selectize.min.css" rel="stylesheet" />
+<script src="/static/selectize-0.12.6.min.js"></script>
+<style>
+  :root {
+    --modal-width: 640px;
+    --lyrics-dropdown-font-size: 1.1rem;
+    --lyrics-custom-search-gap: 1.75rem;
+    --lyrics-message-font-size: 1rem;
+  }
+
+  .optgroup-header { font-weight: bold; }
+
+  .row { display: flex; border-bottom: 1px solid #444; }
+  .col-icon { padding-left: 1px; }
+  .col-text { padding-left: 2px; font-size: 120%; }
+
+  .selectize-input {
+    height: 40px;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    font-size: 1rem;
+  }
+
+  /* ── Search result list ── */
+  ul.search_result_items { list-style: none; padding: 0; margin: 0; }
+
+  ul.search_result_items li {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0.75rem;
+    gap: 0;
+  }
+  ul.search_result_items li:nth-child(odd) { background-color: rgb(50, 55, 55); }
+
+  .search_result_main {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.75rem;
+  }
+  @media screen and (min-width: 768px) {
+    .search_result_main { flex-direction: row; align-items: center; }
+  }
+
+  /* Thumbnail */
+  #search-results .img-wrapper {
+    position: relative;
+    cursor: pointer;
+    width: 100%;
+    flex-shrink: 0;
+  }
+  @media screen and (min-width: 768px) {
+    #search-results .img-wrapper { width: 200px; }
+  }
+  #search-results .img-frame {
+    position: relative;
+    overflow: hidden;
+    aspect-ratio: 16 / 9;
+    background: #2a2a3e;
+  }
+  #search-results .img-wrapper img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: opacity 0.3s ease;
+  }
+  #search-results .img-wrapper:hover img { opacity: 0.7; }
+
+  #search-results .img-wrapper::before {
+    content: "";
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 80px; height: 80px;
+    background: rgba(0,0,0,0.6);
+    border-radius: 50%;
+    opacity: 0.7;
+    transition: opacity 0.3s ease;
+    pointer-events: none;
+    z-index: 1;
+  }
+  #search-results .img-wrapper::after {
+    font-family: "fontello";
+    content: "\e800";
+    position: absolute;
+    top: 50%; left: 52%;
+    transform: translate(-50%, -50%);
+    font-size: 2rem;
+    color: white;
+    opacity: 0.9;
+    transition: all 0.3s ease;
+    pointer-events: none;
+    z-index: 2;
+  }
+  #search-results .img-wrapper:hover::before { opacity: 1; }
+  #search-results .img-wrapper:hover::after {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.2);
+  }
+
+  .duration-badge {
+    position: absolute;
+    bottom: 4px; right: 4px;
+    background: rgba(0,0,0,0.8);
+    color: #fff;
+    font-size: 0.75rem;
+    padding: 2px 4px;
+    border-radius: 3px;
+    pointer-events: none;
+    z-index: 3;
+  }
+
+  /* Meta row */
+  .search_result_items_meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+  }
+  .search_result_items_meta > div:first-child { flex: 1; min-width: 0; }
+  /* Video preview modal */
+  #modal-js-example { align-items: flex-start; overflow-y: auto; }
+  #modal-js-example .modal-content {
+    width: 95vw;
+    max-width: var(--modal-width);
+    max-height: none;
+    margin: 20px auto;
+    overflow: visible;
+  }
+  .video-container { aspect-ratio: 16 / 9; }
+  .video-container video { width: 100%; height: 100%; background: black; }
+  #lyrics-dropdown,
+  #lyrics-custom-input,
+  #lyrics-custom-btn,
+  #lyrics-download-btn { font-size: var(--lyrics-dropdown-font-size) !important; }
+  #lyrics-custom-input,
+  #lyrics-custom-btn { height: 2.5em; line-height: 2.5em; }
+  #lyrics-dropdown { max-width: 100%; }
+  #lyrics-loading,
+  #lyrics-empty,
+  #lyrics-results-label { font-size: var(--lyrics-message-font-size); }
+  #lyrics-results-label { color: #aaa; margin-bottom: 0.1rem; }
+  #lyrics-select-wrap:not(.is-hidden) ~ #lyrics-custom-search:not(.is-hidden),
+  #lyrics-select-wrap:not(.is-hidden) ~ #lyrics-download-wrap:not(.is-hidden) { margin-top: var(--lyrics-custom-search-gap); }
+  #lyrics-select-wrap.select::after { display: none !important; }
+  #lyrics-select-wrap.select { position: relative; }
+  #lyrics-select-wrap.select::before {
+    content: '⌄';
+    position: absolute;
+    right: 0.2em;
+    top: 50%;
+    transform: translateY(-75%);
+    font-size: 6em;
+    color: var(--bulma-primary);
+    pointer-events: none;
+    z-index: 4;
+  }
+</style>
+<script>
+  $(function () {
+    $("#search-link").click(function () {
+      if (!$("#search-link").is("[disabled=disabled]")) {
+        $("#search-link").addClass("is-loading");
+      }
+    });
+
+    $("#direct-download-button").click(function () {
+      var url = $("#direct-download-url").val();
+      if (!url) return;
+      downloadSong(url, "", this);
+    });
+
+  $(document).keypress(function (event) {
+    if (event.which === 13 && !$(event.target).is("#lyrics-custom-input")) {
+      event.preventDefault();
+      if ($(".search-selectize .selectize-input input").val()) {
+        $("#search-link").trigger("click");
+      } else if ($(".search-selectize").find(":selected").text()) {
+        $("#add-queue-link").trigger("click");
+      }
+    }
+  });
+
+    $("#add-queue-link").hide().attr("disabled", "true");
+    $("#search-link").attr("disabled", "true");
+
+    var $select = $("#song_to_add").selectize({
+      valueField:   "path",
+      labelField:   "fileName",
+      searchField:  ["fileName"],
+      optgroupField:"type",
+      optgroups:    [{ value: "autocomplete", label: "Available songs in local library" }],
+      createOnBlur: true,
+      openOnFocus:  false,
+      createFilter: function (input) { return input.length >= 2; },
+
+      onInitialize: function () {
+        var that = this;
+        this.$control.on("click", function () {
+          that.ignoreFocusOpen = true;
+          setTimeout(function () { that.ignoreFocusOpen = false; }, 50);
+        });
+      },
+      onFocus: function () {
+        if ($(window).width() <= 500 && $(window).height() <= 740) {
+          document.getElementById("search-field").scrollIntoView();
+        }
+        if (!this.ignoreFocusOpen) this.open();
+      },
+      onBlur: function () {
+        this.setTextboxValue(this.currentResults.query);
+      },
+      onChange: function (id) {
+        if (!id) {
+          $("#add-queue-link").attr("disabled", "true").hide();
+          $("#search-link").removeAttr("disabled").show();
+        } else {
+          $("#add-queue-link").removeAttr("disabled").show();
+          $("#search-link").attr("disabled", "true").hide();
+        }
+      },
+      onType: function (text) {
+        if (!text) {
+          $("#search-link").attr("disabled", "true");
+        } else {
+          $("#search-link").removeAttr("disabled");
+          $("#add-queue-link").hide();
+          $("#search-link").show();
+        }
+      },
+      render: {
+        option: function (item, escape) {
+          return (
+            '<div class="row">' +
+            '<div class="col-icon"><i class="icon icon-music has-text-info"></i></div>' +
+            '<div class="col-text">' + escape(item.fileName) + "</div>" +
+            "</div>"
+          );
+        },
+        optgroup_header: function (data, escape) {
+          return '<div class="optgroup-header">' + escape(data.label) + "</div>";
+        },
+      },
+      load: function (query, callback) {
+        if (query.length < 2) return callback([]);
+        $.ajax({
+          url: "/autocomplete",
+          type: "get",
+          data: { q: query },
+          success: function (data) { callback(data); },
+          error:   function ()     { callback([]); },
+        });
+      },
+    });
+
+    // Restore previous search term from URL param
+    const urlParams = new URLSearchParams(window.location.search);
+    const qSearchString = urlParams.get("search_string");
+    if (qSearchString) {
+      $("#song_to_add-selectized").val(qSearchString).width("100%");
+    }
+
+    // Persist results across back-navigation
+    const resultsContainer = document.getElementById("container_search_result");
+    if (resultsContainer) {
+      sessionStorage.setItem("proto_search_results", resultsContainer.outerHTML);
+      sessionStorage.setItem("proto_search_term", "{{ search_string|e }}");
+    } else {
+      const saved = sessionStorage.getItem("proto_search_results");
+      if (saved) {
+        $("#searching_loader").after(saved);
+        const savedTerm = sessionStorage.getItem("proto_search_term");
+        if (savedTerm) $("#song_to_add-selectized").val(savedTerm).width("100%");
+      }
+    }
+
+    $("#clear-search").on("click", function (e) {
+      e.preventDefault();
+      $select[0].selectize.clear();
+      $("#song_to_add-selectized").val("");
+      sessionStorage.removeItem("proto_search_results");
+      sessionStorage.removeItem("proto_search_term");
+      $("#container_search_result").remove();
+    });
+
+    $("#search-link").on("click", function (e) {
+      e.preventDefault();
+      var search_term = $(".search-selectize .selectize-input input").val();
+      if (!search_term) return;
+      $("#searching_loader").removeClass("is-hidden");
+      $("#searching_loader #search_term").text(search_term);
+      $("#search-link").attr("disabled", "true");
+      $("#search_string").val(search_term);
+      $("#container_search_result").hide();
+      $("#container_search_form form").submit();
+    });
+
+    $("#add-queue-link").on("click", function (e) {
+      e.preventDefault();
+      if (!$(".search-selectize").find(":selected").text()) return;
+      $("#add-queue-link").attr("disabled", "true").addClass("is-loading");
+      $.ajax({
+        url: "/enqueue",
+        type: "post",
+        data: $("#queue-form").serialize(),
+        success: function (data) {
+          var obj = typeof data === "string" ? JSON.parse(data) : data;
+          showNotification(obj.success[1], obj.success[0] ? "is-success" : "is-danger");
+          $select[0].selectize.clear();
+          $("#add-queue-link").removeClass("is-loading").removeAttr("disabled");
+        },
+        error: function () {
+          $("#add-queue-link").removeClass("is-loading").removeAttr("disabled");
+        },
+      });
+    });
+
+    $("#advanced-settings").hide();
+    $("#show-advanced").on("change", function () {
+      $("#advanced-settings").toggle($(this).is(":checked"));
+    });
+
+    $("#direct-download-url").on("input", function () {
+      if (isYoutubeURL($(this).val())) {
+        $("#direct-download-button").removeAttr("disabled");
+      } else {
+        $("#direct-download-button").attr("disabled", true);
+      }
+    });
+
+    setUserCookie();
+    $(".song_added_by").val(getUserCookie());
+
+    // Restore "add to queue" checkbox state
+    var storedAddToQueue = Cookies.get("add-to-queue-on-download");
+    if (storedAddToQueue !== undefined) {
+      var checked = storedAddToQueue === "true";
+      $("#add-to-queue-direct, #add-to-queue-search").prop("checked", checked);
+    }
+    $("#add-to-queue-direct, #add-to-queue-search").on("change", function () {
+      var isChecked = $(this).is(":checked");
+      Cookies.set("add-to-queue-on-download", isChecked, { expires: 365 });
+      $("#add-to-queue-direct, #add-to-queue-search").prop("checked", isChecked);
+    });
+
+    // ── Download / enqueue from results ────────────────────────────────────────
+
+    function downloadSong(songUrl, songTitle, button) {
+      var $btn = $(button);
+      var originalHtml = $btn.html();
+      $btn.css("min-width", $btn.outerWidth() + "px").addClass("is-loading").attr("disabled", true);
+      $.ajax({
+        url: "/download",
+        type: "POST",
+        contentType: "application/json",
+        data: JSON.stringify({
+          song_url:      songUrl,
+          song_title:    songTitle || "",
+          song_added_by: getUserCookie() || "",
+          queue:         $("#add-to-queue-search").is(":checked"),
+        }),
+        success: function () {
+          $btn.removeClass("is-loading").addClass("is-success").html('<i class="icon icon-ok"></i>');
+          setTimeout(function () {
+            $btn.removeClass("is-success").html(originalHtml).removeAttr("disabled").css("min-width", "");
+          }, 3000);
+        },
+        error: function () {
+          $btn.removeClass("is-loading").addClass("is-danger").text("!");
+          setTimeout(function () {
+            $btn.removeClass("is-danger").html(originalHtml).removeAttr("disabled").css("min-width", "");
+          }, 3000);
+        },
+      });
+    }
+
+    function enqueueLocalSong(filePath, button) {
+      var $btn = $(button);
+      var originalHtml = $btn.html();
+      $btn.css("min-width", $btn.outerWidth() + "px").addClass("is-loading").attr("disabled", true);
+      $.ajax({
+        url: "/enqueue",
+        type: "GET",
+        data: { song: filePath, user: getUserCookie() || "" },
+        success: function (data) {
+          var result = typeof data === "string" ? JSON.parse(data) : data;
+          if (result.success[0]) {
+            $btn.removeClass("is-loading").html('<i class="icon icon-ok"></i>');
+          } else {
+            $btn.removeClass("is-loading").addClass("is-warning").text("Already queued");
+          }
+          setTimeout(function () {
+            $btn.removeClass("is-warning").html(originalHtml).removeAttr("disabled").css("min-width", "");
+          }, 3000);
+        },
+        error: function () {
+          $btn.removeClass("is-loading").addClass("is-danger").text("!");
+          setTimeout(function () {
+            $btn.removeClass("is-danger").html(originalHtml).removeAttr("disabled").css("min-width", "");
+          }, 3000);
+        },
+      });
+    }
+
+    $(document).on("click", ".search_result_items_enqueue", function () {
+      enqueueLocalSong($(this).closest("li").attr("data-file-path"), this);
+    });
+
+    // ── Video preview modal ─────────────────────────────────────────────────────
+
+  var _activeYtTitle = "";
+  var _activeYtId = "";
+
+  function resetLyricsSection() {
+    $("#lyrics-loading").addClass("is-hidden");
+    $("#lyrics-results-label").addClass("is-hidden");
+    $("#lyrics-select-wrap").addClass("is-hidden");
+    $("#lyrics-empty").addClass("is-hidden");
+    $("#lyrics-custom-search").addClass("is-hidden");
+    $("#lyrics-download-wrap").addClass("is-hidden");
+    $("#lyrics-custom-input").val("");
+    $("#lyrics-dropdown").empty();
+  }
+
+  function populateLyricsDropdown(data) {
+    var $sel = $("#lyrics-dropdown").empty();
+    $("#lyrics-loading").addClass("is-hidden");
+    if (!data.length) {
+      $("#lyrics-empty").removeClass("is-hidden");
+      $("#lyrics-custom-search").removeClass("is-hidden");
+      $("#lyrics-custom-input").focus();
+    } else {
+      var $genius = $('<optgroup label="Genius.com Results">');
+        data.forEach(function (item) {
+          $genius.append($("<option>").val(item.id).text(item.title + " — " + item.artist));
+        });
+      $sel.append($genius);
+
+      var $other = $('<optgroup label="Other Options">');
+      $other.append($("<option>").val("__custom__").text("🔍 Custom Search..."));
+      $other.append($("<option>").val("__raw__").text("📝 Raw Transcription"));
+      $sel.append($other);
+
+    $("#lyrics-results-label").removeClass("is-hidden");
+    $("#lyrics-select-wrap").removeClass("is-hidden");
+    // Trigger change so download-button visibility matches the auto-selected option
+    $("#lyrics-dropdown").trigger("change");
+  }
+}
+
+    function runLyricsSearch(query) {
+      $("#lyrics-loading").removeClass("is-hidden");
+      $("#lyrics-select-wrap").addClass("is-hidden");
+      $("#lyrics-empty").addClass("is-hidden");
+      $("#lyrics-custom-search").addClass("is-hidden");
+      $("#lyrics-dropdown").empty();
+      $.ajax({
+        url: "/lyrics_search",
+        type: "get",
+        data: { q: query },
+        success: populateLyricsDropdown,
+        error: function () {
+          populateLyricsDropdown([]);
+        },
+      });
+    }
+
+  $("#lyrics-dropdown").on("change", function () {
+    var val = $(this).val();
+    if (val === "__custom__") {
+      $("#lyrics-custom-search").removeClass("is-hidden");
+      $("#lyrics-download-wrap").addClass("is-hidden");
+      $("#lyrics-custom-input").focus();
+    } else if (val === "__raw__") {
+      $("#lyrics-custom-search").addClass("is-hidden");
+      $("#lyrics-download-wrap").removeClass("is-hidden");
+      $("#lyrics-download-btn").attr("disabled", true).text("Download");
+    } else {
+      $("#lyrics-custom-search").addClass("is-hidden");
+      $("#lyrics-download-wrap").removeClass("is-hidden");
+      $("#lyrics-download-btn").removeAttr("disabled").text("Download");
+    }
+  });
+
+    function doCustomLyricsSearch() {
+      var query = $("#lyrics-custom-input").val().trim();
+      if (!query) return;
+      runLyricsSearch(query);
+    }
+
+  $("#lyrics-custom-btn").on("click", doCustomLyricsSearch);
+  $("#lyrics-custom-input").on("keydown", function (e) {
+    if (e.key === "Enter") doCustomLyricsSearch();
+  });
+
+  // ── Download lyrics button ──────────────────────────────────────────────
+  $("#lyrics-download-btn").on("click", function () {
+    var $btn = $(this);
+    if ($btn.is(":disabled")) return;
+    var val = $("#lyrics-dropdown").val();
+    if (val === "__raw__") {
+      // Raw transcription selected — do nothing
+      return;
+    }
+    if (!val || val === "__custom__") return;
+
+    var originalHtml = $btn.html();
+    $btn.css("min-width", $btn.outerWidth() + "px").addClass("is-loading").attr("disabled", true);
+
+    var songId = parseInt(val, 10);
+
+    function flashError(detail) {
+      console.warn("Lyrics download failed:", detail);
+      $btn.removeClass("is-loading").addClass("is-danger").text("!");
+      setTimeout(function () {
+        $btn.removeClass("is-danger").html(originalHtml).removeAttr("disabled").css("min-width", "");
+      }, 3000);
+    }
+
+    $.ajax({
+      url: "/lyrics_download",
+      type: "POST",
+      contentType: "application/json",
+      data: JSON.stringify({ id: songId, yt_title: _activeYtTitle, yt_id: _activeYtId }),
+      success: function (data) {
+        if (data.error) {
+          flashError(data.error);
+          return;
+        }
+        $btn.removeClass("is-loading").addClass("is-success")
+          .html('<i class="icon icon-ok"></i>&nbsp; Added for processing...');
+        setTimeout(function () {
+          $btn.removeClass("is-success").html(originalHtml).removeAttr("disabled").css("min-width", "");
+        }, 3000);
+      },
+      error: function (xhr) {
+        flashError(xhr && xhr.responseText ? xhr.responseText : "network error");
+      },
+    });
+  });
+
+    function openPreviewModal($li) {
+      const modal       = document.getElementById("modal-js-example");
+      const modalVideo  = document.getElementById("modal-video");
+      const videoUrl    = $li.attr("value");
+      const videoTitle  = $li.attr("data-yttitle");
+      _activeYtTitle = videoTitle || "";
+      _activeYtId    = $li.attr("data-ytid") || "";
+
+      modal.classList.add("is-active");
+
+      // iOS autoplay unlock: synchronously call play() on the empty video inside
+      // the click handler so Safari ties it to the user gesture. Without this,
+      // .play() from the async AJAX callback is blocked.
+      modalVideo.play().then(function () { modalVideo.pause(); }).catch(function () {});
+
+      $.ajax({
+        url: "/preview",
+        type: "get",
+        data: { url: videoUrl },
+        success: function (data) {
+          if (modal.classList.contains("is-active") && data.stream_url) {
+            modalVideo.src = data.stream_url;
+            modalVideo.load();
+            modalVideo.play().catch(function () {});
+          }
+        },
+      });
+
+      resetLyricsSection();
+      runLyricsSearch(videoTitle);
+
+      const closeModal = function () {
+        modal.classList.remove("is-active");
+        modalVideo.pause();
+        modalVideo.removeAttribute("src");
+        modalVideo.load();
+        resetLyricsSection();
+      };
+
+      const closeButton = modal.querySelector(".modal-close");
+      closeButton.focus();
+      closeButton.onclick = closeModal;
+      modal.querySelector(".modal-background").onclick = closeModal;
+    }
+
+    $("#search-results").on("click", ".img-wrapper", function () {
+      openPreviewModal($(this).closest("li"));
+    });
+
+    $(document).on("click", ".search_result_items_select", function () {
+      openPreviewModal($(this).closest("li"));
+    });
+  });
+</script>
+{% endblock %}
+
+{% block header %}
+<h1>{% block title %}Search / Add New{% endblock %}</h1>
+{% endblock %}
+
+{% block content %}
+<div>
+  <div class="field" id="container_queue_form">
+    <form id="queue-form">
+      <div id="search-field" class="field has-addons mb-1">
+        <div class="control is-expanded">
+          <select id="song_to_add" class="search-selectize is-size-7" name="song_to_add">
+            <optgroup label="Available Songs" id="available-songs"></optgroup>
+          </select>
+        </div>
+        <div class="control">
+          <a class="button is-warning" id="search-link">Search</a>
+          <a class="button is-info"    id="add-queue-link">Added to queue</a>
+        </div>
+        <input class="song_added_by" type="hidden" name="song_added_by" />
+      </div>
+
+      <div class="control is-flex is-justify-content-flex-end is-align-items-center mb-2">
+        <a id="clear-search" class="has-text-danger" href="#" style="margin-right: 15px">Clear</a>
+        <label class="checkbox is-flex is-align-items-center">
+          <input type="checkbox" id="show-advanced" class="checkbox" />
+          &nbsp;Advanced
+        </label>
+      </div>
+
+      <article class="message">
+        <div class="message-body">
+          <div class="columns is-vcentered is-mobile">
+            <div class="column is-narrow">
+              <span class="icon has-text-warning">
+                <i class="icon icon-info-circled-1 is-size-4"></i>
+              </span>
+            </div>
+            <div class="column has-text-warning-light">
+              <p class="mb-1 is-italic">- Type a song (title/artist) to search the available songs and click 'Add to queue'.</p>
+              <p class="is-italic">- If the song doesn't appear in the dropdown, click 'Search' to find it on YouTube.</p>
+            </div>
+          </div>
+        </div>
+      </article>
+    </form>
+  </div>
+
+  <!-- Advanced: direct URL download -->
+  <div>
+    <div id="advanced-settings" class="box has-background-black-bis" style="margin-top: 10px; display: none">
+      <div class="control">
+        <div class="label">Direct download YouTube url:</div>
+        <div>
+          <input class="input" id="direct-download-url" type="text" value="https://www.youtube.com/watch?v=" />
+          <div class="field" style="margin-top: 5px">
+            <label class="checkbox is-flex is-align-items-center">
+              <input type="checkbox" class="checkbox" checked id="add-to-queue-direct" />
+              &nbsp;Add to queue once downloaded
+            </label>
+          </div>
+          <div class="has-text-right" style="margin-top: 5px">
+            <button class="button is-rounded is-primary" disabled id="direct-download-button">Download</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <hr />
+
+  <!-- Hidden form that triggers the real GET /search navigation -->
+  <div class="field is-hidden" id="container_search_form">
+    <form action="/search" method="get">
+      <input id="search_string" type="text" name="search_string" />
+    </form>
+  </div>
+
+  <div id="searching_loader" class="control is-loading is-hidden">
+    Searching YouTube for <small><i>'<span id="search_term"></span>'</i></small>
+  </div>
+
+  {% if search_results %}
+  <div class="field" id="container_search_result">
+    <label class="label">
+      Search results for <small><i>'{{ search_string }}'</i></small>
+    </label>
+    <div class="field">
+      <label class="checkbox is-flex is-align-items-center">
+        <input type="checkbox" checked id="add-to-queue-search" class="checkbox" />
+        &nbsp;Add to queue once downloaded
+      </label>
+    </div>
+    <ul id="search-results" class="search_result_items">
+      {% for title, url, id, channel, duration, existing_path in search_results %}
+      <li data-ytID="{{ id }}"
+          data-ytTitle="{{ title }}"
+          value="{{ url }}"
+          data-index="{{ loop.index0 }}"
+          {% if existing_path %}data-file-path="{{ existing_path }}"{% endif %}>
+
+        <div class="search_result_main">
+          <div class="img-wrapper" data-url="{{ url }}">
+            <div class="img-frame">
+              <img src="https://img.youtube.com/vi/{{ id }}/mqdefault.jpg" alt="{{ title }}" />
+              {% if duration %}<span class="duration-badge">{{ duration }}</span>{% endif %}
+            </div>
+          </div>
+
+          <div class="search_result_items_meta">
+            <div>
+              {{ title }}
+              {% if channel %}<div class="is-size-7 has-text-grey">{{ channel }}</div>{% endif %}
+              <a href="{{ url }}" target="_blank" rel="noopener noreferrer" class="is-size-7 has-text-info">YouTube ↗</a>
+            </div>
+            {% if existing_path %}
+            <button class="button is-success search_result_items_enqueue">Add to Queue</button>
+            {% else %}
+            <button class="button search_result_items_select">Select</button>
+            {% endif %}
+          </div>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+
+    <div id="modal-js-example" class="modal">
+      <div class="modal-background"></div>
+      <div class="modal-content">
+        <div class="video-container">
+          <video id="modal-video" controls playsinline muted preload="metadata"></video>
+        </div>
+        <div id="lyrics-section" style="margin-top: 0.75rem;">
+          <p id="lyrics-loading" class="has-text-grey is-hidden">Searching lyrics...</p>
+          <p id="lyrics-results-label" class="is-hidden">Genius.com lyrics search results:</p>
+          <div id="lyrics-select-wrap" class="select is-fullwidth is-small is-hidden">
+            <select id="lyrics-dropdown"></select>
+          </div>
+          <p id="lyrics-empty" class="has-text-grey is-hidden">No lyrics results found. Use custom search below...</p>
+              <div id="lyrics-custom-search" class="is-hidden">
+                <div class="field has-addons">
+                  <div class="control is-expanded">
+                    <input id="lyrics-custom-input" class="input" type="text" placeholder="Search lyrics..." />
+                  </div>
+                  <div class="control">
+                    <button id="lyrics-custom-btn" class="button is-warning">Search</button>
+                  </div>
+                </div>
+              </div>
+              <div id="lyrics-download-wrap" class="is-hidden">
+                <button id="lyrics-download-btn" class="button is-primary is-fullwidth" disabled>Download Lyrics</button>
+              </div>
+            </div>
+      </div>
+      <button class="modal-close is-large" aria-label="close"></button>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
