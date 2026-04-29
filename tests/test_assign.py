@@ -1,13 +1,8 @@
-"""Unit tests for run.py helpers: assign_speakers_from_genius,
-annotate_display_labels."""
+"""Unit tests for run.py helpers: assign_speakers_from_genius."""
 
 import pytest
 
-from genius_diarize.genius import truncate_speaker_label
-from genius_diarize.run import (
-    annotate_display_labels,
-    assign_speakers_from_genius,
-)
+from genius_diarize.run import assign_speakers_from_genius
 
 
 def _make_line_obj(text, words=None, speaker=None):
@@ -133,69 +128,3 @@ class TestAssignSpeakersFromGenius:
         assert line_objs[2]["dominant_speaker"] == "Kevin"
 
 
-# ---------------------------------------------------------------------------
-# annotate_display_labels
-# ---------------------------------------------------------------------------
-
-
-class TestAnnotateDisplayLabels:
-    def test_first_full_then_truncated(self):
-        """First occurrence gets full label, subsequent gets truncated."""
-        line_objs = [
-            {"speaker": "Brian", "text": "Line 1"},
-            {"speaker": "Brian", "text": "Line 2"},
-            {"speaker": "Brian", "text": "Line 3"},
-        ]
-        annotate_display_labels(line_objs)
-
-        assert line_objs[0]["display_label"] == "Brian"
-        assert line_objs[1]["display_label"] == "B"
-        assert line_objs[2]["display_label"] == "B"
-
-    def test_independent_per_speaker(self):
-        """Each speaker_label tracked independently."""
-        line_objs = [
-            {"speaker": "Brian", "text": "Line 1"},
-            {"speaker": "Nick", "text": "Line 2"},
-            {"speaker": "Brian", "text": "Line 3"},
-            {"speaker": "Nick", "text": "Line 4"},
-        ]
-        annotate_display_labels(line_objs)
-
-        assert line_objs[0]["display_label"] == "Brian"
-        assert line_objs[1]["display_label"] == "Nick"
-        assert line_objs[2]["display_label"] == "B"
-        assert line_objs[3]["display_label"] == "N"
-
-    def test_none_passes_through(self):
-        """speaker=None → display_label=None."""
-        line_objs = [
-            {"speaker": None, "text": "Ensemble"},
-        ]
-        annotate_display_labels(line_objs)
-
-        assert line_objs[0]["display_label"] is None
-
-    def test_duet_label(self):
-        """Named duet: full on first, truncated on subsequent."""
-        line_objs = [
-            {"speaker": "Kevin & AJ", "text": "Line 1"},
-            {"speaker": "Kevin & AJ", "text": "Line 2"},
-        ]
-        annotate_display_labels(line_objs)
-
-        assert line_objs[0]["display_label"] == "Kevin & AJ"
-        assert line_objs[1]["display_label"] == "K & A"
-
-    def test_mixed_speakers_and_none(self):
-        """Mix of labeled and unlabeled lines."""
-        line_objs = [
-            {"speaker": "Brian", "text": "Solo"},
-            {"speaker": None, "text": "Ensemble"},
-            {"speaker": "Brian", "text": "Solo again"},
-        ]
-        annotate_display_labels(line_objs)
-
-        assert line_objs[0]["display_label"] == "Brian"
-        assert line_objs[1]["display_label"] is None
-        assert line_objs[2]["display_label"] == "B"

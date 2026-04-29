@@ -1,11 +1,10 @@
-"""Unit tests for genius_diarize/caption.py: SRT with display_label,
+"""Unit tests for genius_diarize/caption.py: plain-text SRT,
 ASS with dominant_speaker color keying."""
 
 import pytest
 
 from genius_diarize.caption import (
     _dominant_speaker_presence,
-    _speaker_presence,
     generate_ass,
     generate_srt,
 )
@@ -50,41 +49,33 @@ def _cfg():
 
 
 class TestSRT:
-    def test_full_label_first(self):
-        """First appearance uses full speaker label."""
+    def test_no_speaker_prefix_multi_speaker(self):
+        """Multi-speaker output emits plain text — no inline labels."""
         lines = [
             _make_line("Hello world", "Brian", display_label="Brian"),
-            _make_line("Ensemble", None, display_label=None),
+            _make_line("Goodbye", "Nick", display_label="Nick"),
+            _make_line("All together", None, display_label=None),
         ]
         srt_text = generate_srt(lines, _cfg())
-        assert "Brian: Hello world" in srt_text
-
-    def test_truncated_subsequent(self):
-        """Subsequent appearance uses truncated label."""
-        lines = [
-            _make_line("First", "Brian", display_label="Brian"),
-            _make_line("Second", "Brian", display_label="B"),
-            _make_line("Ensemble", None, display_label=None),
-        ]
-        srt_text = generate_srt(lines, _cfg())
-        assert "Brian: First" in srt_text
-        assert "B: Second" in srt_text
-
-    def test_no_label_when_none(self):
-        """Ensemble lines (speaker=None) have no prefix."""
-        lines = [_make_line("All together", None)]
-        srt_text = generate_srt(lines, _cfg())
-        # Should NOT have "None:" or any prefix
+        assert "Hello world" in srt_text
+        assert "Goodbye" in srt_text
         assert "All together" in srt_text
-        assert ": " not in srt_text.replace("Hello world", "")
+        assert "Brian:" not in srt_text
+        assert "Nick:" not in srt_text
 
-    def test_single_speaker_no_prefix(self):
-        """Single speaker mode omits prefix entirely."""
+    def test_no_speaker_prefix_single_speaker(self):
+        """Single-speaker output is also plain text."""
         lines = [_make_line("Hello world", "Brian")]
         srt_text = generate_srt(lines, _cfg())
-        # Single speaker: no prefix
-        assert "Brian:" not in srt_text
         assert "Hello world" in srt_text
+        assert "Brian:" not in srt_text
+
+    def test_ensemble_only(self):
+        """Ensemble (speaker=None) lines render as plain text."""
+        lines = [_make_line("All together", None)]
+        srt_text = generate_srt(lines, _cfg())
+        assert "All together" in srt_text
+        assert "None" not in srt_text
 
 
 # ---------------------------------------------------------------------------
@@ -159,11 +150,3 @@ class TestPresenceHelpers:
         assert present == ["Kevin"]
         assert has_ensemble is False
 
-    def test_speaker_presence_distinct(self):
-        """Different speaker labels → separate entries."""
-        lines = [
-            _make_line("Solo", "Kevin", dominant_speaker="Kevin"),
-            _make_line("Duet", "Kevin & AJ", dominant_speaker="Kevin"),
-        ]
-        present, _ = _speaker_presence(lines)
-        assert present == ["Kevin", "Kevin & AJ"]

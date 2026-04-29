@@ -1,13 +1,11 @@
-"""Caption generation: SRT + per-speaker karaoke ASS.
+"""Caption generation: plain-text SRT + per-speaker karaoke ASS.
 
-Adapted from diarized_captions/caption.py with these changes:
-
-- SRT reads ``line["display_label"]`` when present (set by run.py's
-  annotate_display_labels); falls back to ``line["speaker"]`` for compat
-  with non-Genius callers.
+- SRT is plain lyric text. Header→line attribution is too imprecise to
+  put names inline; a wrong inline label reads as an authoritative claim.
 - ASS style/color palette is built off ``line["dominant_speaker"]`` so
   that a Kevin solo and a Kevin & AJ duet share one color slot. Falls
-  back to ``line["speaker"]`` if dominant_speaker is absent.
+  back to ``line["speaker"]`` if dominant_speaker is absent. The karaoke
+  fill sweep itself encodes attribution — no inline speaker label.
 - No ``speaker_letters`` dependency — speaker labels are arbitrary strings.
 """
 
@@ -25,36 +23,20 @@ _ENSEMBLE_COLOR_FALLBACK = "&H0000D7FF&"  # goldenrod — fallback if not in cfg
 
 
 def generate_srt(line_objects, cfg):
-    """Build .srt content from line objects.
+    """Build .srt content from line objects as plain lyric text.
 
-    Uses ``line["display_label"]`` when present (full name on first
-    appearance, truncated on subsequent — set by annotate_display_labels
-    in run.py). Falls back to ``line["speaker"]`` for non-Genius callers.
-
-    Lines with display_label=None (ensemble) have no prefix.
-    In single-speaker mode (only one speaker label, no ensemble lines),
-    the prefix is omitted entirely — plain lyric text.
+    Speaker labels are intentionally omitted: header→line attribution is
+    imprecise, and a wrong inline name reads as an authoritative claim.
+    The ASS output still carries per-speaker color for visual cueing.
     """
-    present, has_ensemble = _speaker_presence(line_objects)
-    single_speaker = len(present) <= 1 and not has_ensemble
-
     subs = []
     for i, line in enumerate(line_objects, start=1):
-        if single_speaker or line.get("speaker") is None:
-            content = line["text"]
-        else:
-            # Use display_label if available (Genius pipeline), else speaker
-            label = line.get("display_label", line.get("speaker"))
-            if label is None:
-                content = line["text"]
-            else:
-                content = f"{label}: {line['text']}"
         subs.append(
             srt.Subtitle(
                 index=i,
                 start=datetime.timedelta(seconds=line["start"]),
                 end=datetime.timedelta(seconds=line["end"]),
-                content=content,
+                content=line["text"],
             )
         )
     return srt.compose(subs)
@@ -64,14 +46,14 @@ def generate_ass(line_objects, cfg):
     """Build .ass content from line objects using config styling/timing.
 
     Style/color palette is built off ``dominant_speaker`` so that a solo
-    line and a duet line for the same singer share one color slot.
+    line and a duet line for the same singer share one color slot. The
+    karaoke fill sweep itself encodes attribution — no inline speaker
+    label is rendered.
 
-    Lines with dominant_speaker=None (or speaker=None) get the white
-    ensemble style with no speaker prefix.
-
-    Single-speaker fallback: if only one dominant speaker appears and
-    there are no ensemble lines, emit a single ``Style: Karaoke``
-    (goldenrod) and skip the speaker prefix.
+    Lines with dominant_speaker=None (or speaker=None) get the ensemble
+    style. Single-speaker fallback: if only one dominant speaker appears
+    and there are no ensemble lines, emit a single ``Style: Karaoke``
+    (goldenrod).
     """
     present, has_ensemble = _dominant_speaker_presence(line_objects)
     single_speaker = len(present) <= 1 and not has_ensemble
@@ -189,14 +171,6 @@ def _generate_ass_events(line_objects, cfg, single_speaker):
         prev_end = event_start
         parts = []
 
-        # Speaker prefix (plain text, no \kf) — omitted in single-speaker
-        # or ensemble. Uses display_label when present for SRT consistency;
-        # falls back to speaker.
-        if not single_speaker and speaker is not None:
-            prefix = line_obj.get("display_label", speaker)
-            if prefix is not None:
-                parts.append(f"{prefix}: ")
-
         for i, word_data in enumerate(words):
             word = word_data["word"]
             word_start = word_data["start"]
@@ -254,25 +228,6 @@ def _dominant_speaker_presence(line_objects):
         if ds is not None and ds not in seen:
             seen.add(ds)
             present.append(ds)
-    has_ensemble = any(l.get("speaker") is None for l in line_objects)
-    return present, has_ensemble
-
-
-def _speaker_presence(line_objects):
-    """Return (present_labels, has_ensemble) keyed by speaker.
-
-    present_labels: list of non-None speaker values in first-appearance
-    order.
-
-    has_ensemble: True if any line has speaker=None.
-    """
-    seen = set()
-    present = []
-    for line in line_objects:
-        s = line.get("speaker")
-        if s is not None and s not in seen:
-            seen.add(s)
-            present.append(s)
     has_ensemble = any(l.get("speaker") is None for l in line_objects)
     return present, has_ensemble
 

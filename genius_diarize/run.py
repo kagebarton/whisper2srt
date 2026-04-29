@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from genius_diarize.config import GeniusDiarizeConfig
 from genius_diarize.caption import generate_srt, generate_ass
-from genius_diarize.genius import genius_singer_mode, truncate_speaker_label
+from genius_diarize.genius import genius_singer_mode
 from genius_diarize.word_extraction import (
     extract_words,
     load_genius_lyrics,
@@ -54,23 +54,6 @@ def assign_speakers_from_genius(line_objects, genius_lines):
         for word in line_obj["words"]:
             word["speaker"] = gl["speaker_label"]
             word["dominant_speaker"] = gl["dominant_speaker"]
-
-
-def annotate_display_labels(line_objects):
-    """Walk lines in time order; first occurrence of each speaker_label gets
-    the full label, subsequent occurrences get the truncated label. Sets
-    line_obj["display_label"] (str | None).
-    """
-    seen = set()
-    for line_obj in line_objects:
-        label = line_obj.get("speaker")
-        if label is None:
-            line_obj["display_label"] = None
-        elif label not in seen:
-            seen.add(label)
-            line_obj["display_label"] = label
-        else:
-            line_obj["display_label"] = truncate_speaker_label(label)
 
 
 def reset_segment_first_flags(line_objects):
@@ -152,7 +135,6 @@ def main():
         if mode == "multi":
             # --- Assign speakers from Genius headers ---
             assign_speakers_from_genius(line_objects, genius_lines)
-            annotate_display_labels(line_objects)
             logger.info("Speaker assignment complete (Genius headers only)")
         else:
             logger.info(

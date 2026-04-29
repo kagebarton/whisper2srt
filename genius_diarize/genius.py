@@ -203,37 +203,3 @@ def split_groups(attribution: str) -> list[list[str]]:
     return groups
 
 
-def truncate_speaker_label(speaker_label: str) -> str:
-    """Abbreviate a speaker label for SRT subsequent appearances.
-
-    Rules:
-        - ``"All"`` → ``"All"`` (no change)
-        - Single name → first letter of first whitespace-delimited token.
-          (``"Brian"`` → ``"B"``, ``"Mary Jane"`` → ``"M"``,
-          ``"O'Brien"`` → ``"O"``, ``"Jean-Paul"`` → ``"J"``)
-        - Named pair ``"A & B"`` → ``"<initial(A)> & <initial(B)>"``
-          (``"Kevin & AJ"`` → ``"K & A"``)
-        - 3+ name group → initial-join with ``" & "``.
-
-    Initial collisions (e.g., two singers named "Brian") are accepted in v1.
-
-    Returns:
-        Abbreviated label string.
-    """
-    if speaker_label == "All":
-        return "All"
-
-    # Check if it's a pair/group (contains " & ")
-    if " & " in speaker_label:
-        parts = speaker_label.split(" & ")
-        initials = [_initial(p.strip()) for p in parts]
-        return " & ".join(initials)
-
-    # Single name
-    return _initial(speaker_label)
-
-
-def _initial(name: str) -> str:
-    """Return the first letter of the first whitespace-delimited token."""
-    token = name.split()[0] if name.split() else ""
-    return token[0] if token else ""

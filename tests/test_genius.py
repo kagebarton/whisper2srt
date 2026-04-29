@@ -6,7 +6,6 @@ from genius_diarize.genius import (
     genius_singer_mode,
     parse_genius_sections,
     split_groups,
-    truncate_speaker_label,
 )
 
 
@@ -284,34 +283,6 @@ class TestSplitGroups:
     def test_trailing_comma(self):
         """Trailing comma produces empty group, which is skipped."""
         assert split_groups("Brian,") == [["Brian"]]
-
-
-# ---------------------------------------------------------------------------
-# truncate_speaker_label
-# ---------------------------------------------------------------------------
-
-
-class TestTruncateSpeakerLabel:
-    def test_single_name(self):
-        assert truncate_speaker_label("Brian") == "B"
-
-    def test_pair(self):
-        assert truncate_speaker_label("Kevin & AJ") == "K & A"
-
-    def test_all_no_change(self):
-        assert truncate_speaker_label("All") == "All"
-
-    def test_multiword(self):
-        assert truncate_speaker_label("Mary Jane") == "M"
-
-    def test_hyphen(self):
-        assert truncate_speaker_label("Jean-Paul") == "J"
-
-    def test_apostrophe(self):
-        assert truncate_speaker_label("O'Brien") == "O"
-
-    def test_triple_group(self):
-        assert truncate_speaker_label("A & B & C") == "A & B & C"
 
 
 # ---------------------------------------------------------------------------
