@@ -98,8 +98,8 @@ class LyricAlignStage(BaseStage):
             # activity scope. It's not cancellable. A cancel arriving during
             # regroup is caught by REFINE's activity() on entry via the sticky
             # `cancelled` flag.
-            if self._config.whisper_regroup:
-                result.regroup(self._config.whisper_regroup)
+            if self._config.whisper.regroup:
+                result.regroup(self._config.whisper.regroup)
 
             line_objects = self._segments_to_line_objects(result)
             write_srt = True

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -7,31 +7,50 @@ _MODELS_DIR = str(_REPO_ROOT / "models")
 
 @dataclass
 class WhisperModelConfig:
+    # --- Model loading ---
     model_path: str = str(_REPO_ROOT / "models" / "large-v3-turbo.pt")
     device: str = "auto"
-    compute_type: str = "int8"
+    compute_type: str = "float16"
+
+    # --- Language / VAD ---
     language: str = "en"
     vad: bool = True
-    vad_threshold: float = 0.25
-    suppress_silence: bool = True
-    suppress_word_ts: bool = False
-    only_voice_freq: bool = False
-    refine_steps: str = "se"
+    vad_threshold: float = 0.1        # lower = more sensitive; 0.1 catches soft vocals
+
+    # --- Silence handling ---
+    # False: preserve timing in quiet regions (breathing, held pauses between phrases).
+    # On a pre-separated vocal stem there is no background noise to suppress.
+    suppress_silence: bool = False
+    suppress_word_ts: bool = False     # keep word-level timestamps in quiet regions
+
+    # --- Frequency filtering ---
+    # True: restrict mel features to the human vocal range (~85–3000 Hz).
+    # Always beneficial on a vocal stem — removes any residual low-frequency bleed.
+    only_voice_freq: bool = True
+
+    # --- Transcription decoding ---
+    temperature: float = 0.0          # 0 = greedy/deterministic; best for alignment accuracy
+    beam_size: int = 5                 # beam search width for transcription
+    condition_on_previous_text: bool = False  # False prevents hallucination drift in long songs
+    initial_prompt: str = ""           # optional text hint to guide transcription style/vocab
+
+    # --- Word duration floor ---
+    # 0.05 s allows short syllables in fast lyrics (default stable-ts is 0.1 s).
+    min_word_dur: float = 0.025
+
+    # --- Refinement ---
+    refine_steps: str = "se"          # 's' = refine starts, 'e' = ends, 'se' = both
     refine_word_level: bool = True
-    regroup: str = ""
-    condition_on_previous_text: bool = False
+
+    # --- Regrouping (transcription mode only) ---
+    regroup: str = ""                  # stable-ts regroup expression; empty = no regrouping
 
 
 @dataclass
 class PipelineConfig:
     # --- Model paths ---
-    whisper_model_path: str = str(_REPO_ROOT / "models" / "large-v3-turbo.pt")
     separator_model_dir: str = _MODELS_DIR
     separator_model_name: str = "vocals_mel_band_roformer.ckpt"
-
-    # --- Device/compute ---
-    whisper_device: str = "auto"
-    whisper_compute_type: str = "int8"
 
     # --- Intermediate files directory ---
     intermediate_dir: str = "/mnt/ramdisk"  # Empty = system temp dir
@@ -42,16 +61,7 @@ class PipelineConfig:
     loudnorm_target_lra: float = 7.0  # Target loudness range (LU)
 
     # --- Whisper alignment options ---
-    whisper_language: str = "en"
-    whisper_vad: bool = True
-    whisper_vad_threshold: float = 0.25
-    whisper_suppress_silence: bool = True
-    whisper_suppress_word_ts: bool = False
-    whisper_only_voice_freq: bool = False
-    whisper_refine_steps: str = "se"  # 's' = refine starts, 'e' = refine ends, 'se' = both
-    whisper_refine_word_level: bool = True
-    whisper_regroup: str = ""
-    whisper_condition_on_previous_text: bool = False
+    whisper: WhisperModelConfig = field(default_factory=WhisperModelConfig)
 
     # --- ASS styling ---
     font_name: str = "Arial"

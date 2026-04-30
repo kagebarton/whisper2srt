@@ -32,21 +32,7 @@ log = logging.getLogger("pipeline.run_pipeline")
 
 
 def build_whisper_config(cfg: PipelineConfig) -> WhisperModelConfig:
-    return WhisperModelConfig(
-        model_path=cfg.whisper_model_path,
-        device=cfg.whisper_device,
-        compute_type=cfg.whisper_compute_type,
-        language=cfg.whisper_language,
-        vad=cfg.whisper_vad,
-        vad_threshold=cfg.whisper_vad_threshold,
-        suppress_silence=cfg.whisper_suppress_silence,
-        suppress_word_ts=cfg.whisper_suppress_word_ts,
-        only_voice_freq=cfg.whisper_only_voice_freq,
-        refine_steps=cfg.whisper_refine_steps,
-        refine_word_level=cfg.whisper_refine_word_level,
-        regroup=cfg.whisper_regroup,
-        condition_on_previous_text=cfg.whisper_condition_on_previous_text,
-    )
+    return cfg.whisper
 
 
 # ---------------------------------------------------------------------------
