@@ -115,7 +115,7 @@ def _generate_styles(cfg, present, single_speaker, has_ensemble=False):
             primary = (
                 cfg.speaker_colors[color_idx]
                 if color_idx < len(cfg.speaker_colors)
-                else cfg.speaker_colors[-1]
+                else cfg.speaker_colors[color_idx % len(cfg.speaker_colors)]
             )
             safe = _safe_style_name(label)
             rows.append(

@@ -13,7 +13,10 @@ rules:
 No pyannote, no overlap detection, no cluster mapping — just headers.
 """
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # Header regex: [Section] or [Section: Attribution]
 _HEADER_RE = re.compile(r"^\[([^\]]+)\]\s*$")
@@ -23,6 +26,13 @@ _FULL_PAREN_RE = re.compile(r"^\((.+)\)$")
 
 # Strip inline backing-vocal parentheticals for whisper alignment
 _INLINE_PAREN_RE = re.compile(r"\s*\([^)]*\)")
+
+# Strip trailing section number for fuzzy carry-forward ("Verse 2" → "Verse")
+_SEC_NUM_RE = re.compile(r"\s+\d+$")
+
+
+def _section_base(name: str) -> str:
+    return _SEC_NUM_RE.sub("", name).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -42,12 +52,8 @@ def _resolve_attribution(groups):
 
     Rules:
         - 0 groups / no attribution    → ensemble
-        - 1 group, "All"               → ensemble
-        - 1 group, single name         → labeled
-        - 1 group, named pair          → labeled with pair
-        - 2+ groups, any is "All"      → ensemble
-        - 2+ named groups              → ensemble
-        - 1 group                      → label from it
+        - first name is "All"          → ensemble
+        - otherwise                    → color by first name of first group
     """
     if groups is None:
         return None, None, True
@@ -56,14 +62,10 @@ def _resolve_attribution(groups):
     if group_count == 0:
         return None, None, True
 
-    if group_count >= 2:
+    # "All" as the first name → ensemble; otherwise color by first name
+    if groups[0][0] == "All":
         return None, None, True
 
-    # Any group is "All" → ensemble
-    if any(g == ["All"] for g in groups):
-        return None, None, True
-
-    # Exactly 1 fully-named group — label from it
     return _resolve_first_group(groups[0])
 
 
@@ -105,7 +107,8 @@ def parse_genius_sections(lyrics_text: str) -> list[dict]:
 
     current_section = ""
     current_groups = None  # None = no attribution yet
-    section_history: dict = {}  # section_name → last groups with attribution
+    section_history: dict = {}       # exact section_name → last groups with attribution
+    section_base_history: dict = {}  # _section_base(name) → last groups with attribution
 
     for line in lines:
         stripped = line.strip()
@@ -121,11 +124,20 @@ def parse_genius_sections(lyrics_text: str) -> list[dict]:
                 current_section = section_part.strip()
                 current_groups = split_groups(attr_part.strip())
                 section_history[current_section] = current_groups
+                section_base_history[_section_base(current_section)] = current_groups
             else:
                 current_section = bracket_content.strip()
-                # Carry forward attribution from the last time this exact
-                # section name appeared with explicit attribution.
-                current_groups = section_history.get(current_section, None)
+                # Exact-name carry-forward first; fall back to section family
+                # (e.g. "[Verse 2]" inherits from "[Verse 1: Brian]").
+                current_groups = section_history.get(current_section)
+                if current_groups is None:
+                    base = _section_base(current_section)
+                    current_groups = section_base_history.get(base)
+                    if current_groups is not None:
+                        logger.debug(
+                            "Section '%s' inheriting attribution from section family '%s'",
+                            current_section, base,
+                        )
             continue
 
         # Skip fully-parenthesized lines (e.g., ``(ad-lib)``)
