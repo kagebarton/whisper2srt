@@ -7,7 +7,7 @@ rules:
 - Single group, single name  → labeled
 - Single group, named duet   → labeled with pair
 - Single group "All"         → unlabeled (ensemble)
-- Multiple groups            → unlabeled (ensemble)
+- Multiple groups            → colored by first group
 - No attribution (no ``:``)  → unlabeled
 
 No pyannote, no overlap detection, no cluster mapping — just headers.
@@ -21,11 +21,7 @@ logger = logging.getLogger(__name__)
 # Header regex: [Section] or [Section: Attribution]
 _HEADER_RE = re.compile(r"^\[([^\]]+)\]\s*$")
 
-# Regex to detect if the entire line is parenthesized
-_FULL_PAREN_RE = re.compile(r"^\((.+)\)$")
 
-# Strip inline backing-vocal parentheticals for whisper alignment
-_INLINE_PAREN_RE = re.compile(r"\s*\([^)]*\)")
 
 # Strip trailing section number for fuzzy carry-forward ("Verse 2" → "Verse")
 _SEC_NUM_RE = re.compile(r"\s+\d+$")
@@ -140,16 +136,7 @@ def parse_genius_sections(lyrics_text: str) -> list[dict]:
                         )
             continue
 
-        # Skip fully-parenthesized lines (e.g., ``(ad-lib)``)
-        if _FULL_PAREN_RE.match(stripped):
-            continue
-
-        # Alignment text: strip inline backing-vocal parentheticals so
-        # whisper isn't asked to match "(Bye, bye)" or "(Yeah)" tokens
-        # that may be absent or overlapping in the vocal stem.
-        align_text = _INLINE_PAREN_RE.sub("", stripped).strip()
-        if not align_text:
-            continue  # entire content was parenthetical
+        align_text = stripped
 
         # Non-header, non-blank, non-paren — emit a GeniusLine
         speaker_label, dominant_speaker, is_ensemble = _resolve_attribution(

@@ -39,12 +39,12 @@ Tell me why
 | `[Verse 1: Brian]` | 1 group, single name | Labeled **Brian** |
 | `[Bridge: Kevin & AJ]` | 1 group, named pair | Labeled **Kevin & AJ** |
 | `[Chorus: All]` | 1 group, "All" | Unlabeled (ensemble) |
-| `[Chorus: Nick, All]` | 2+ groups | Unlabeled (ensemble) |
-| `[Chorus: Brian, AJ]` | 2+ named groups | Unlabeled (ensemble) |
+| `[Chorus: Nick, All]` | 2+ groups | Colored by first group (**Nick**) |
+| `[Chorus: Brian, AJ]` | 2+ named groups | Colored by first group (**Brian**) |
 | `[Chorus]` after `[Chorus: Rumi]` | Bare repeat | Inherits **Rumi** |
 | `[Verse 3]` with no prior "Verse 3" | No attribution, no history | Unlabeled (ensemble) |
 
-Multi-group headers (2+) are treated as ensemble because line-to-group
+Multi-group headers (2+) are attributed to the first group because line-to-group
 alignment within a section is unknown. Bare section headers (no `:`)
 carry forward the attribution from the last time that exact section
 name appeared with explicit attribution.
