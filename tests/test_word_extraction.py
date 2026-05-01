@@ -75,8 +75,8 @@ class TestScore:
         assert _score("fire", "fire") == 2
 
     def test_contraction_expansion(self):
-        assert _score("im", "i") == 0  # "i" not a contraction expansion
-        assert _score("dont", "do") == 0
+        assert _score("im", "i") == 2  # "i" is part of contraction expansion "i am"
+        assert _score("dont", "do") == 2
         # "wanna" → "want to"; if whisper says "wanna" and lyric says "wanna" → exact
         assert _score("wanna", "wanna") == 2
 
@@ -91,7 +91,7 @@ class TestScore:
 
     def test_contraction_match(self):
         assert _score("cant", "cannot") == 2  # "cant" → "cannot" in table
-        assert _score("dont", "do") == 0       # "do" is not the expansion
+        assert _score("dont", "do") == 2       # "do" is part of "do not"
 
 
 # ---------------------------------------------------------------------------

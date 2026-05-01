@@ -164,14 +164,16 @@ def _levenshtein(a: str, b: str) -> int:
     return prev[n]
 
 
-_GAP = -1  # gap penalty for NW
+_GAP_LYRIC = -2   # penalty for lyric word with no whisper match
+_GAP_WHISPER = -1 # penalty for whisper token with no lyric match
 
 
 def _needleman_wunsch(lyric_norms: list, whisper_norms: list) -> list:
-    """Global sequence alignment (Needleman-Wunsch).
+    """Semi-Global sequence alignment.
 
     Returns list of (lyric_idx | None, whisper_idx | None) pairs.
     None on either side means a gap on that sequence.
+    Handles asymmetric penalties and free whisper prefix/suffix.
     """
     m, n = len(lyric_norms), len(whisper_norms)
 
@@ -187,20 +189,34 @@ def _needleman_wunsch(lyric_norms: list, whisper_norms: list) -> list:
     # Fill DP table
     dp = [[0] * (n + 1) for _ in range(m + 1)]
     for i in range(m + 1):
-        dp[i][0] = i * _GAP
+        dp[i][0] = i * _GAP_LYRIC
     for j in range(n + 1):
-        dp[0][j] = j * _GAP
+        dp[0][j] = 0  # Free Whisper prefix
 
     for i in range(1, m + 1):
         for j in range(1, n + 1):
             match = dp[i - 1][j - 1] + _cached_score(lyric_norms[i - 1], whisper_norms[j - 1])
-            delete = dp[i - 1][j] + _GAP  # lyric token with no whisper match
-            insert = dp[i][j - 1] + _GAP  # whisper token with no lyric match
+            delete = dp[i - 1][j] + _GAP_LYRIC  # lyric token with no whisper match
+            insert = dp[i][j - 1] + _GAP_WHISPER  # whisper token with no lyric match
             dp[i][j] = max(match, delete, insert)
 
     # Traceback
     alignment = []
-    i, j = m, n
+    
+    # Find best Whisper suffix point (free suffix)
+    best_j = n
+    max_score = dp[m][n]
+    for j_opt in range(n):
+        if dp[m][j_opt] > max_score:
+            max_score = dp[m][j_opt]
+            best_j = j_opt
+
+    i, j = m, best_j
+    
+    # Mark skipped suffix whisper tokens
+    for j_skip in range(n, best_j, -1):
+        alignment.append((None, j_skip - 1))
+
     while i > 0 or j > 0:
         if i > 0 and j > 0:
             s = _cached_score(lyric_norms[i - 1], whisper_norms[j - 1])
@@ -209,12 +225,18 @@ def _needleman_wunsch(lyric_norms: list, whisper_norms: list) -> list:
                 i -= 1
                 j -= 1
                 continue
-        if i > 0 and dp[i][j] == dp[i - 1][j] + _GAP:
+        if i > 0 and dp[i][j] == dp[i - 1][j] + _GAP_LYRIC:
             alignment.append((i - 1, None))
             i -= 1
-        else:
+        elif j > 0 and dp[i][j] == dp[i][j - 1] + _GAP_WHISPER:
             alignment.append((None, j - 1))
             j -= 1
+        elif j > 0 and i == 0:
+            # Reached top row, free prefix traceback
+            alignment.append((None, j - 1))
+            j -= 1
+        else:
+            break
 
     alignment.reverse()
     return alignment
@@ -246,7 +268,9 @@ def match_words_to_lines(words: list, lines: list, align_lines: list = None) -> 
     # Build flat lyric token list tagged with line index
     lyric_tokens = []  # [(norm_tok, line_idx)]
     for line_idx, aline in enumerate(align_lines):
-        for tok in aline.split():
+        # Handle em-dashes and en-dashes by splitting them into separate words before normalization
+        aline_split = aline.replace("—", " ").replace("--", " ")
+        for tok in aline_split.split():
             norm = _normalize_token(tok)
             if norm:
                 lyric_tokens.append((norm, line_idx))
@@ -275,14 +299,17 @@ def match_words_to_lines(words: list, lines: list, align_lines: list = None) -> 
 
     # Build one line_obj per lyric line
     line_objects = []
-    prev_end = 0.0
     for line_idx in range(n_lines):
         display_text = lines[line_idx]
         w_indices = line_whisper_indices[line_idx]
 
         if not w_indices:
-            logger.warning("No aligned whisper words for line: %r", display_text)
-            line_obj = {"text": display_text, "words": [], "start": prev_end, "end": prev_end}
+            line_objects.append({
+                "text": display_text,
+                "words": [],
+                "start": None,
+                "end": None,
+            })
         else:
             # Deduplicate while preserving order (monotone alignment)
             seen: set = set()
@@ -292,15 +319,32 @@ def match_words_to_lines(words: list, lines: list, align_lines: list = None) -> 
                     seen.add(idx)
                     unique.append(idx)
             line_words = [words[i] for i in unique]
-            line_obj = {
+            line_objects.append({
                 "text": display_text,
                 "words": line_words,
                 "start": line_words[0]["start"],
                 "end": line_words[-1]["end"],
-            }
-            prev_end = line_obj["end"]
+            })
 
-        line_objects.append(line_obj)
+    # Interpolate missing lines
+    for i, obj in enumerate(line_objects):
+        if obj["start"] is None:
+            logger.warning("No aligned whisper words for line: %r. Interpolating timestamps.", obj["text"])
+            
+            prev_end = 0.0
+            for j in range(i - 1, -1, -1):
+                if line_objects[j]["end"] is not None:
+                    prev_end = line_objects[j]["end"]
+                    break
+                    
+            next_start = prev_end
+            for j in range(i + 1, len(line_objects)):
+                if line_objects[j]["start"] is not None:
+                    next_start = line_objects[j]["start"]
+                    break
+                    
+            obj["start"] = prev_end
+            obj["end"] = next_start
 
     return line_objects
 
