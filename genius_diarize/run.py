@@ -28,6 +28,7 @@ from genius_diarize.word_extraction import (
     extract_words,
     load_genius_lyrics,
     match_words_to_lines,
+    match_words_to_lines_by_count,
 )
 from genius_diarize.workers.whisper_worker import WhisperWorker
 
@@ -88,6 +89,22 @@ def main():
         type=Path,
         help="Genius-formatted lyrics file (.txt) with section headers",
     )
+    parser.add_argument(
+        "--save-whisper",
+        action="store_true",
+        help="Save raw Whisper alignment result as <stem>.whisper.json next to the audio file.",
+    )
+    parser.add_argument(
+        "--no-vad",
+        action="store_true",
+        help="Disable Silero VAD during whisper alignment (forces model to attempt every region).",
+    )
+    parser.add_argument(
+        "--match-method",
+        choices=["nw", "count"],
+        default="nw",
+        help="Lyric→whisper word matching: 'nw' (Needleman-Wunsch, default) or 'count' (legacy positional slicing).",
+    )
     args = parser.parse_args()
 
     vocal_path = args.vocal_audio
@@ -101,6 +118,9 @@ def main():
         sys.exit(1)
 
     cfg = GeniusDiarizeConfig()
+    if args.no_vad:
+        cfg.whisper.vad = False
+        logger.info("VAD disabled — whisper will attempt to align every region.")
 
     # --- Parse lyrics (single source of truth) ---
     lyrics_text = lyrics_path.read_text(encoding="utf-8")
@@ -119,10 +139,18 @@ def main():
         # --- Align ---
         logger.info(f"Aligning lyrics: {lyrics_path.name} → {vocal_path.name}")
         result = whisper_worker.align_and_refine(vocal_path, plain_text)
+
+        if args.save_whisper:
+            whisper_json = vocal_path.with_name(vocal_path.stem + ".whisper.json")
+            result.save_as_json(str(whisper_json))
+            logger.info(f"Whisper result saved: {whisper_json}")
+
         words = extract_words(result)
         lyrics_lines = [g["text"] for g in genius_lines]
         align_lines = [g["align_text"] for g in genius_lines]
-        line_objects = match_words_to_lines(words, lyrics_lines, align_lines)
+        matcher = match_words_to_lines if args.match_method == "nw" else match_words_to_lines_by_count
+        logger.info(f"Matching method: {args.match_method}")
+        line_objects = matcher(words, lyrics_lines, align_lines)
         reset_segment_first_flags(line_objects)
 
         # Guard: line_objects and genius_lines must agree in count

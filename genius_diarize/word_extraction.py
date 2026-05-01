@@ -54,26 +54,48 @@ def load_genius_lyrics(lyrics_text: str) -> tuple:
     return genius_lines, plain_text
 
 
+# Words with probability below this threshold are treated as Whisper
+# hallucinations — they appear when the model is forced to emit tokens
+# for a silent/unintelligible region and clusters them at a single
+# zero-duration timestamp. Letting NW match them collapses whole lines
+# to that timestamp. Real low-confidence words sit around 0.05+; the
+# phantom cluster is in the 1e-5 to 1e-3 range.
+_MIN_WORD_PROBABILITY = 0.0001
+
+
 def extract_words(result) -> list:
     """Flatten WhisperResult into [{word, start, end, is_segment_first, speaker}, ...].
 
-    Each word dict is initialized with ``speaker: None`` and
-    ``dominant_speaker: None`` so the type annotation is honest before
-    speaker assignment runs.
+    Drops words with probability below _MIN_WORD_PROBABILITY (whisper
+    hallucinations from silent regions). Each word dict is initialized
+    with ``speaker: None`` and ``dominant_speaker: None`` so the type
+    annotation is honest before speaker assignment runs.
     """
     all_words = []
+    dropped = 0
     for segment in result.segments:
-        for i, word in enumerate(segment.words):
+        kept_in_segment = 0
+        for word in segment.words:
+            prob = getattr(word, "probability", None)
+            if prob is not None and prob < _MIN_WORD_PROBABILITY:
+                dropped += 1
+                continue
             all_words.append(
                 {
                     "word": word.word.strip(),
                     "start": word.start,
                     "end": word.end,
-                    "is_segment_first": i == 0,
+                    "is_segment_first": kept_in_segment == 0,
                     "speaker": None,
                     "dominant_speaker": None,
                 }
             )
+            kept_in_segment += 1
+    if dropped:
+        logger.info(
+            "Dropped %d low-probability whisper words (< %.2f) — likely silent-region hallucinations",
+            dropped, _MIN_WORD_PROBABILITY,
+        )
     return all_words
 
 
@@ -114,6 +136,12 @@ def _score(lyric_tok: str, whisper_tok: str) -> int:
     w_exp = _CONTRACTIONS.get(whisper_tok)
     if (l_exp == whisper_tok) or (lyric_tok == w_exp) or (l_exp and l_exp == w_exp):
         return 2
+    # Handle 1:N splits: whisper may split a contraction the lyrics keep whole, or vice versa.
+    # e.g. lyric "dont" vs whisper "do"/"not": check if whisper_tok is any word in l_exp.
+    if l_exp and whisper_tok in l_exp.split():
+        return 2
+    if w_exp and lyric_tok in w_exp.split():
+        return 2
     # Fuzzy: Levenshtein-1 for tokens long enough that a 1-char edit is meaningful
     if len(lyric_tok) >= 3 and len(whisper_tok) >= 3:
         if _levenshtein(lyric_tok, whisper_tok) <= 1:
@@ -147,6 +175,15 @@ def _needleman_wunsch(lyric_norms: list, whisper_norms: list) -> list:
     """
     m, n = len(lyric_norms), len(whisper_norms)
 
+    # Scoped score cache — same pair appears in both DP fill and traceback.
+    score_cache: dict = {}
+
+    def _cached_score(a: str, b: str) -> int:
+        key = (a, b)
+        if key not in score_cache:
+            score_cache[key] = _score(a, b)
+        return score_cache[key]
+
     # Fill DP table
     dp = [[0] * (n + 1) for _ in range(m + 1)]
     for i in range(m + 1):
@@ -156,7 +193,7 @@ def _needleman_wunsch(lyric_norms: list, whisper_norms: list) -> list:
 
     for i in range(1, m + 1):
         for j in range(1, n + 1):
-            match = dp[i - 1][j - 1] + _score(lyric_norms[i - 1], whisper_norms[j - 1])
+            match = dp[i - 1][j - 1] + _cached_score(lyric_norms[i - 1], whisper_norms[j - 1])
             delete = dp[i - 1][j] + _GAP  # lyric token with no whisper match
             insert = dp[i][j - 1] + _GAP  # whisper token with no lyric match
             dp[i][j] = max(match, delete, insert)
@@ -166,7 +203,7 @@ def _needleman_wunsch(lyric_norms: list, whisper_norms: list) -> list:
     i, j = m, n
     while i > 0 or j > 0:
         if i > 0 and j > 0:
-            s = _score(lyric_norms[i - 1], whisper_norms[j - 1])
+            s = _cached_score(lyric_norms[i - 1], whisper_norms[j - 1])
             if dp[i][j] == dp[i - 1][j - 1] + s:
                 alignment.append((i - 1, j - 1))
                 i -= 1
@@ -264,6 +301,46 @@ def match_words_to_lines(words: list, lines: list, align_lines: list = None) -> 
             prev_end = line_obj["end"]
 
         line_objects.append(line_obj)
+
+    return line_objects
+
+
+def match_words_to_lines_by_count(words: list, lines: list, align_lines: list = None) -> list:
+    """Legacy count-based pairing — kept as a CLI fallback for comparison.
+
+    Slices the flat whisper word list by lyric-line word count, in order.
+    Brittle: any mismatch between lyric word count and aligned word count
+    cascades to all subsequent lines.
+
+    Args:
+        words: flat whisper word list from extract_words().
+        lines: display text per lyric line (may include inline parens).
+        align_lines: stripped text per lyric line used for word counting.
+            If None, falls back to lines.
+    """
+    if align_lines is None:
+        align_lines = lines
+
+    line_objects = []
+    word_index = 0
+
+    for display_line, align_line in zip(lines, align_lines):
+        line_word_count = len(align_line.split())
+        line_words = words[word_index : word_index + line_word_count]
+        word_index += line_word_count
+
+        if not line_words:
+            line_objects.append({"text": display_line, "words": [], "start": 0.0, "end": 0.0})
+            continue
+
+        line_objects.append(
+            {
+                "text": display_line,
+                "words": line_words,
+                "start": line_words[0]["start"],
+                "end": line_words[-1]["end"],
+            }
+        )
 
     return line_objects
 
