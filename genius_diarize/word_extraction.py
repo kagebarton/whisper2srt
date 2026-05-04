@@ -124,14 +124,20 @@ def _normalize_token(token: str) -> str:
 def _score(lyric_tok: str, whisper_tok: str) -> int:
     """Alignment score for a lyric/whisper token pair.
 
-    +2 exact normalized match
-    +1 one-edit-distance match (tokens ≥3 chars) — handles minor typos
-         and contracted vs. expanded forms
-     0 mismatch
+    +3 exact match, len >= 6 (anchor bonus — long words pin alignment)
+    +2 exact match, len < 6
+    +2 contraction equivalence (1:1 or 1:N split)
+    +1 phonetic equivalence (_PHONETIC_EQUIV — vowel elongation, spelling variants)
+    +1 one-edit-distance match (tokens >=3 chars) — handles minor typos
+    0 mismatch
     """
+    # Exact match: anchor bonus for long words
     if lyric_tok == whisper_tok:
-        return 2
-    # Check contraction equivalence
+        return 3 if len(lyric_tok) >= 6 else 2
+    # Contraction equivalence.
+    # All current _CONTRACTIONS keys and split values are <= 6 chars, so no
+    # contraction match would benefit from the +3 anchor bonus. If 6+ char
+    # contractions are added later, reorder the branches or merge the checks.
     l_exp = _CONTRACTIONS.get(lyric_tok)
     w_exp = _CONTRACTIONS.get(whisper_tok)
     if (l_exp == whisper_tok) or (lyric_tok == w_exp) or (l_exp and l_exp == w_exp):
@@ -142,6 +148,10 @@ def _score(lyric_tok: str, whisper_tok: str) -> int:
         return 2
     if w_exp and lyric_tok in w_exp.split():
         return 2
+    # Phonetic equivalence (vowel elongation, spelling variants)
+    pair = frozenset({lyric_tok, whisper_tok})
+    if pair in _PHONETIC_EQUIV:
+        return 1
     # Fuzzy: Levenshtein-1 for tokens long enough that a 1-char edit is meaningful
     if len(lyric_tok) >= 3 and len(whisper_tok) >= 3:
         if _levenshtein(lyric_tok, whisper_tok) <= 1:
@@ -164,12 +174,64 @@ def _levenshtein(a: str, b: str) -> int:
     return prev[n]
 
 
-_GAP_LYRIC = -2   # penalty for lyric word with no whisper match
+_GAP_LYRIC = -2 # penalty for lyric word with no whisper match
 _GAP_WHISPER = -1 # penalty for whisper token with no lyric match
 
+# Maximum value _score() can return. Used by _needleman_wunsch to size the
+# _NEG_INF sentinel and to guard the gap-cost invariant.
+# UPDATE this if any branch of _score() returns a higher value.
+_MAX_MATCH = 3
 
-def _needleman_wunsch(lyric_norms: list, whisper_norms: list) -> list:
-    """Semi-Global sequence alignment.
+# Invariant: a single match must never exceed the cost of gapping both sides
+# of a token. Otherwise NW becomes indifferent between matching a token and
+# gapping both sides of it. Anchor bonus +3 ties gap-pair cost -3; this is
+# acceptable because mismatches don't get the anchor bonus, and banding
+# (Change 2) provides the real defense against drift. Must hold whenever
+# _score / gap costs are tuned.
+assert _MAX_MATCH <= -(_GAP_LYRIC + _GAP_WHISPER), \
+    "Single match score must not exceed gap-pair cost"
+
+# Phonetic equivalence pairs (vowel-elongation and a few spelling variants)
+# that the Levenshtein-1 fuzzy gate (len >= 3) excludes.
+# Score returned: +1 (same tier as fuzzy).
+#
+# NOTE: pairs are NOT transitive. If "mm"~"mmm" and "mmm"~"mmmm" are both
+# needed later, add all three pairwise entries explicitly, OR refactor to a
+# canonical-form dict:
+#   _PHONETIC_CANON = {"mm": "mm", "mmm": "mm", "mmmm": "mm", ...}
+#   match: _PHONETIC_CANON.get(a) == _PHONETIC_CANON.get(b) != None
+#
+# NOTE: this lookup MUST run after the exact-match branch.
+# frozenset({"mm", "mm"}) collapses to frozenset({"mm"}) and won't match any
+# pair entry — exact match catches that case at +2 first.
+#
+# Known gap NOT in this list: "na"/"nah". "nah" is a real English word meaning
+# "no", so blanket equivalence with "na" produces false positives outside
+# parenthesized vocal-run contexts. Revisit if na-na chorus patterns show real
+# misalignment.
+_PHONETIC_EQUIV = {
+    # vowel-elongation (one side len 2, other len 3)
+    frozenset({"mm", "mmm"}),
+    frozenset({"uh", "uhh"}),
+    frozenset({"oo", "ooh"}),
+    frozenset({"hm", "hmm"}),
+    frozenset({"wo", "woo"}),
+    frozenset({"oh", "ooh"}),
+    frozenset({"ah", "aah"}),
+    frozenset({"ha", "hah"}),  # borderline: both are dictionary words
+    frozenset({"ay", "ayy"}),
+    frozenset({"la", "laa"}),  # common in sung choruses
+    frozenset({"da", "daa"}),  # common in sung choruses
+    # spelling variant (Levenshtein-2; both sides len 4)
+    frozenset({"woah", "whoa"}),
+}
+
+
+_BAND_MIN_LENGTH = 500  # only band sequences longer than this
+
+
+def _needleman_wunsch_unbanded(lyric_norms: list, whisper_norms: list) -> list:
+    """Unbanded (full O(m*n)) Semi-Global NW alignment.
 
     Returns list of (lyric_idx | None, whisper_idx | None) pairs.
     None on either side means a gap on that sequence.
@@ -202,7 +264,7 @@ def _needleman_wunsch(lyric_norms: list, whisper_norms: list) -> list:
 
     # Traceback
     alignment = []
-    
+
     # Find best Whisper suffix point (free suffix)
     best_j = n
     max_score = dp[m][n]
@@ -212,7 +274,7 @@ def _needleman_wunsch(lyric_norms: list, whisper_norms: list) -> list:
             best_j = j_opt
 
     i, j = m, best_j
-    
+
     # Mark skipped suffix whisper tokens
     for j_skip in range(n, best_j, -1):
         alignment.append((None, j_skip - 1))
@@ -240,6 +302,133 @@ def _needleman_wunsch(lyric_norms: list, whisper_norms: list) -> list:
 
     alignment.reverse()
     return alignment
+
+
+def _needleman_wunsch_banded(lyric_norms: list, whisper_norms: list) -> list:
+    """Banded (Sakoe-Chiba) Semi-Global NW alignment with taper and fallback.
+
+    Constrain the inner DP to a band around the expected diagonal. If the
+    banded result looks degenerate (true optimal alignment likely exited the
+    band), fall back to unbanded NW.
+    """
+    m, n = len(lyric_norms), len(whisper_norms)
+
+    # Scoped score cache — same pair appears in both DP fill and traceback.
+    score_cache: dict = {}
+
+    def _cached_score(a: str, b: str) -> int:
+        key = (a, b)
+        if key not in score_cache:
+            score_cache[key] = _score(a, b)
+        return score_cache[key]
+
+    band = max(50, max(m, n) // 4)
+    taper_rows = min(band, m // 4)
+
+    # Sentinel for out-of-band cells. Must stay more negative than any
+    # achievable real path value, even after _MAX_MATCH bonuses are added
+    # during transitions. The * 2 margin keeps the invariant under future
+    # scoring tweaks.
+    neg_inf = -(m + n + 1) * _MAX_MATCH * 2
+    assert neg_inf + _MAX_MATCH * max(m, n) < 0, \
+        "Sentinel insufficient for current scoring constants"
+
+    # Fill DP table (full allocation; defer row-band repr for long-form)
+    dp = [[neg_inf] * (n + 1) for _ in range(m + 1)]
+    for i in range(m + 1):
+        dp[i][0] = i * _GAP_LYRIC
+    for j in range(n + 1):
+        dp[0][j] = 0  # Free Whisper prefix
+
+    for i in range(1, m + 1):
+        # round() uses banker's rounding (round-half-to-even); the
+        # 0.5-token jitter is absorbed by band width >= 50.
+        j_exp = round(i * n / m)
+
+        # Taper: widen the band over the last `taper_rows` rows so the
+        # free-suffix region is reachable without a cliff.
+        rows_from_end = m - i
+        if taper_rows > 0 and rows_from_end < taper_rows:
+            extra = (taper_rows - rows_from_end) * (n - band) // taper_rows
+            eff_band = band + max(0, extra)
+        else:
+            eff_band = band
+
+        j_lo = max(1, j_exp - eff_band)
+        j_hi = min(n, j_exp + eff_band)
+
+        for j in range(j_lo, j_hi + 1):
+            match_s = dp[i - 1][j - 1] + _cached_score(lyric_norms[i - 1], whisper_norms[j - 1])
+            delete_s = dp[i - 1][j] + _GAP_LYRIC
+            insert_s = dp[i][j - 1] + _GAP_WHISPER
+            dp[i][j] = max(match_s, delete_s, insert_s)
+
+    # Find best Whisper suffix point (free suffix)
+    best_j = n
+    max_score = dp[m][n]
+    for j_opt in range(n):
+        if dp[m][j_opt] > max_score:
+            max_score = dp[m][j_opt]
+            best_j = j_opt
+
+    # Degenerate-result fallback: a healthy alignment should score at least
+    # ~1 match per 3 lyric tokens. If the banded result is much worse, the
+    # band likely clipped the true path.
+    expected_floor = (m / 3) * 2 + (m * 2 / 3) * _GAP_LYRIC
+    if dp[m][best_j] < expected_floor:
+        logger.warning(
+            "Banded NW score %d below expected floor %d; re-running unbanded",
+            dp[m][best_j], int(expected_floor),
+        )
+        return _needleman_wunsch_unbanded(lyric_norms, whisper_norms)
+
+    # Traceback (same logic as unbanded, but some dp cells are neg_inf)
+    alignment = []
+
+    i, j = m, best_j
+
+    # Mark skipped suffix whisper tokens
+    for j_skip in range(n, best_j, -1):
+        alignment.append((None, j_skip - 1))
+
+    while i > 0 or j > 0:
+        if i > 0 and j > 0:
+            s = _cached_score(lyric_norms[i - 1], whisper_norms[j - 1])
+            if dp[i][j] == dp[i - 1][j - 1] + s:
+                alignment.append((i - 1, j - 1))
+                i -= 1
+                j -= 1
+                continue
+        if i > 0 and dp[i][j] == dp[i - 1][j] + _GAP_LYRIC:
+            alignment.append((i - 1, None))
+            i -= 1
+        elif j > 0 and dp[i][j] == dp[i][j - 1] + _GAP_WHISPER:
+            alignment.append((None, j - 1))
+            j -= 1
+        elif j > 0 and i == 0:
+            # Reached top row, free prefix traceback
+            alignment.append((None, j - 1))
+            j -= 1
+        else:
+            break
+
+    alignment.reverse()
+    return alignment
+
+
+def _needleman_wunsch(lyric_norms: list, whisper_norms: list) -> list:
+    """Semi-Global sequence alignment dispatcher.
+
+    Returns list of (lyric_idx | None, whisper_idx | None) pairs.
+    None on either side means a gap on that sequence.
+
+    For short sequences (max(m,n) <= _BAND_MIN_LENGTH), uses full O(m*n)
+    unbanded NW. For longer sequences, uses Sakoe-Chiba banded NW with
+    taper and degenerate-result fallback to unbanded.
+    """
+    if max(len(lyric_norms), len(whisper_norms)) <= _BAND_MIN_LENGTH:
+        return _needleman_wunsch_unbanded(lyric_norms, whisper_norms)
+    return _needleman_wunsch_banded(lyric_norms, whisper_norms)
 
 
 def match_words_to_lines(words: list, lines: list, align_lines: list = None) -> list:
@@ -283,19 +472,54 @@ def match_words_to_lines(words: list, lines: list, align_lines: list = None) -> 
 
     alignment = _needleman_wunsch(lyric_norms, whisper_norms)
 
-    # Map each lyric token index → whisper word index (or None = no match)
+    # Map each lyric token index → whisper word index (or None = no match).
+    # Filter: only record pairs where _score() >= 1. NW may pair tokens at
+    # score 0 (mismatch) when surrounding context makes that the locally-optimal
+    # path; those pairs are structurally correct but timestamp-unreliable.
+    # Rejected lyric tokens fall through to the "start/end is None → interpolate
+    # from neighbors" branch below.
+    #
+    # Threshold semantics: >= 1 accepts exact match (+2, +3 after Change 1),
+    # contraction (+2), Levenshtein-1 fuzzy (+1), and _PHONETIC_EQUIV (+1 after
+    # Change 1). Score 0 (mismatch) is rejected. If a future change wants to
+    # filter more aggressively (e.g. accept only >= 2), _score() will need to
+    # return (score, match_type) tuples so fuzzy and vocal-equiv can be
+    # distinguished.
+    #
+    # _score() is stateless; recomputing here gives the same value used during
+    # NW DP fill. If _score() ever becomes context-aware, switch to returning
+    # (l_idx, w_idx, score) triples from _needleman_wunsch().
+    #
+    # Edge case: when the filter rejects a pair (l_idx, w_idx), the whisper
+    # token at w_idx is still consumed by NW's monotone alignment and is no
+    # longer available for any other lyric token. It also won't appear in any
+    # line's word list. For hallucinations this is desired; for the rare case
+    # where a real whisper word is paired at score 0, the token is silently
+    # dropped and interpolated timing is used instead.
     lyric_to_whisper = [None] * len(lyric_tokens)
     for l_idx, w_idx in alignment:
         if l_idx is not None and w_idx is not None:
-            lyric_to_whisper[l_idx] = w_idx
+            if _score(lyric_norms[l_idx], whisper_norms[w_idx]) >= 1:
+                lyric_to_whisper[l_idx] = w_idx
 
-    # Group whisper word indices by lyric line (monotone → already ordered)
+    # Group whisper word indices by lyric line (monotone → already ordered).
+    # Diagnostic: warn if a line's matched whisper indices are non-monotonic
+    # relative to the previous line's last index — that's the signal that a
+    # line-locality tie-break in NW traceback would help.
     n_lines = len(lines)
     line_whisper_indices: list[list[int]] = [[] for _ in range(n_lines)]
+    prev_line_last_widx = -1
     for ltok_idx, (_, line_idx) in enumerate(lyric_tokens):
         w_idx = lyric_to_whisper[ltok_idx]
         if w_idx is not None:
             line_whisper_indices[line_idx].append(w_idx)
+            if w_idx < prev_line_last_widx and line_idx > 0:
+                logger.warning(
+                    "Non-monotonic whisper index: line %d got w_idx %d "
+                    "but previous line ended at w_idx %d — possible line-boundary leakage",
+                    line_idx, w_idx, prev_line_last_widx,
+                )
+            prev_line_last_widx = max(prev_line_last_widx, w_idx)
 
     # Build one line_obj per lyric line
     line_objects = []

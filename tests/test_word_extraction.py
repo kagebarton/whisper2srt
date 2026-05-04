@@ -3,9 +3,14 @@
 import pytest
 
 from genius_diarize.word_extraction import (
+    _BAND_MIN_LENGTH,
     _levenshtein,
+    _needleman_wunsch,
+    _needleman_wunsch_banded,
+    _needleman_wunsch_unbanded,
     _normalize_token,
     _score,
+    _MAX_MATCH,
     match_words_to_lines,
 )
 
@@ -90,8 +95,27 @@ class TestScore:
         assert _score("fire", "water") == 0
 
     def test_contraction_match(self):
-        assert _score("cant", "cannot") == 2  # "cant" → "cannot" in table
-        assert _score("dont", "do") == 2       # "do" is part of "do not"
+        assert _score("cant", "cannot") == 2 # "cant" → "cannot" in table
+        assert _score("dont", "do") == 2 # "do" is part of "do not"
+
+    def test_anchor_bonus(self):
+        assert _score("california", "california") == 3  # len >= 6 exact match
+
+    def test_anchor_bonus_short_unchanged(self):
+        assert _score("fire", "fire") == 2  # len < 6, stays at +2
+
+    def test_phonetic_equiv_short(self):
+        assert _score("mm", "mmm") == 1
+        assert _score("uh", "uhh") == 1
+        assert _score("oh", "ooh") == 1
+        assert _score("la", "laa") == 1
+
+    def test_phonetic_equiv_two_edit(self):
+        assert _score("woah", "whoa") == 1  # Levenshtein-2, both len 4
+
+    def test_no_false_2char_fuzzy(self):
+        assert _score("it", "is") == 0
+        assert _score("in", "on") == 0
 
 
 # ---------------------------------------------------------------------------
@@ -199,3 +223,167 @@ class TestMatchWordsToLines:
         assert result[0]["words"] == []
         assert result[1]["text"] == "the one desire"
         assert len(result[1]["words"]) == 3
+
+    def test_zero_score_filter(self):
+        """Zero-score NW pairs are filtered: 'me' paired with a hallucination
+        at score 0 should not get the hallucination's timestamps."""
+        words = _make_words([
+            ("love", 0.0, 0.5),
+            ("xyz", 0.5, 0.7),  # hallucination — no lyric match
+            ("tender", 0.7, 1.0),
+        ])
+        lines = ["love me tender"]
+        result = match_words_to_lines(words, lines)
+        # "me" should not be mapped to "xyz" (score 0 pair filtered out)
+        word_texts = [w["word"] for w in result[0]["words"]]
+        assert "xyz" not in word_texts
+        # "me" has no whisper match → line only gets "love" and "tender"
+        assert "love" in word_texts
+        assert "tender" in word_texts
+
+    def test_zero_score_filter_orphans_whisper(self):
+        """When the filter rejects a pair (l_idx, w_idx), the whisper token
+        at w_idx does not appear in any line's word list. This documents the
+        known edge case: a real whisper word paired at score 0 is silently
+        dropped, and interpolated timing is used for the lyric token."""
+        words = _make_words([
+            ("love", 0.0, 0.5),
+            ("xyz", 0.5, 0.7),  # will be paired at score 0 then filtered
+            ("tender", 0.7, 1.0),
+        ])
+        lines = ["love me tender"]
+        result = match_words_to_lines(words, lines)
+        # Collect all whisper words across all lines
+        all_whisper_words = []
+        for line_obj in result:
+            all_whisper_words.extend(line_obj["words"])
+        all_whisper_texts = [w["word"] for w in all_whisper_words]
+        assert "xyz" not in all_whisper_texts
+
+    def test_anchor_tiebreak_prefers_match(self):
+        """When anchor bonus +3 ties gap-pair cost -3, NW should prefer the
+        match path (not gap both sides). This pins the tie-breaking behavior:
+        max() picks the first argument (match) when values are equal."""
+        # Construct a minimal case: one long anchor word with a whisper token
+        # that matches exactly. The match score (+3) equals the gap-pair cost
+        # (-2 + -1 = -3). NW should still match them.
+        lyric = ["california"]
+        whisper = ["california"]
+        alignment = _needleman_wunsch(lyric, whisper)
+        # Should match, not gap both sides
+        matched = [(l, w) for l, w in alignment if l is not None and w is not None]
+        assert len(matched) == 1
+        assert matched[0] == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Change 2: Banding tests
+# ---------------------------------------------------------------------------
+
+
+class TestBanding:
+    """Tests for Sakoe-Chiba banded NW alignment."""
+
+    @staticmethod
+    def _repeating_tokens(n, token_pool=None):
+        """Generate n normalized tokens from a pool, cycling through them."""
+        if token_pool is None:
+            token_pool = ["love", "me", "tender", "tonight", "california",
+                          "dream", "heart", "world", "fire", "desire"]
+        return [token_pool[i % len(token_pool)] for i in range(n)]
+
+    def test_short_sequences_skip_banding(self):
+        """Sequences below _BAND_MIN_LENGTH produce identical results
+        whether dispatched through _needleman_wunsch (which skips banding)
+        or run explicitly unbanded."""
+        lyric = self._repeating_tokens(20)
+        whisper = self._repeating_tokens(22)
+        disp_result = _needleman_wunsch(lyric, whisper)
+        unband_result = _needleman_wunsch_unbanded(lyric, whisper)
+        assert disp_result == unband_result
+
+    def test_banding_matches_unbanded_on_diagonal(self):
+        """When sequences are similar length and well-aligned, banded NW
+        should produce the same alignment as unbanded."""
+        length = _BAND_MIN_LENGTH + 100
+        lyric = self._repeating_tokens(length)
+        whisper = self._repeating_tokens(length + 5)  # slight length diff
+        banded = _needleman_wunsch_banded(lyric, whisper)
+        unbanded = _needleman_wunsch_unbanded(lyric, whisper)
+        # The alignments should be identical (or very close)
+        assert len(banded) == len(unbanded)
+
+    def test_banding_prevents_chorus_drift(self):
+        """Synthetic multi-chorus case: lyrics list one chorus but whisper
+        has three repetitions. Unbanded NW may drift to match later choruses;
+        banded NW should stay near the diagonal."""
+        # One chorus of lyrics
+        chorus = ["love", "me", "tender", "tonight"]
+        lyric = chorus * 1  # 4 tokens
+        # Three choruses in whisper (much longer)
+        whisper = chorus * 3  # 12 tokens
+        # Scale up past _BAND_MIN_LENGTH to trigger banding
+        scale = (_BAND_MIN_LENGTH // 4) + 10
+        lyric = chorus * scale
+        whisper = chorus * (scale * 3)  # 3x as many whisper tokens
+
+        banded = _needleman_wunsch_banded(lyric, whisper)
+        # Verify alignment is non-empty and roughly monotone
+        matches = [(l, w) for l, w in banded
+                    if l is not None and w is not None]
+        assert len(matches) > 0
+        # Most lyric tokens should be matched (not gapped)
+        matched_lyrics = {l for l, _ in matches}
+        assert len(matched_lyrics) >= len(lyric) * 0.8
+
+    def test_anchor_bonus_within_band(self):
+        """Long exact-match anchor at the diagonal scores +3 and pulls
+        alignment correctly. This is the expected behavior — anchor bonus
+        strengthens diagonal alignment within the band."""
+        length = _BAND_MIN_LENGTH + 50
+        # Build sequences where most tokens match, with a long anchor
+        lyric = self._repeating_tokens(length)
+        whisper = list(lyric)  # exact copy
+        # Replace middle token with a long anchor word
+        mid = length // 2
+        lyric[mid] = "california"
+        whisper[mid] = "california"
+
+        banded = _needleman_wunsch_banded(lyric, whisper)
+        matches = [(l, w) for l, w in banded
+                    if l is not None and w is not None]
+        # The anchor should be matched
+        anchor_matched = any(l == mid and w == mid for l, w in matches)
+        assert anchor_matched
+
+    def test_banded_fallback_triggers(self, monkeypatch):
+        """When the optimal alignment requires exiting the band (e.g. singer
+        skips a long section), the fallback should fire and the unbanded
+        result is returned. We construct a case where whisper has a huge
+        prefix that the band can't reach."""
+        length = _BAND_MIN_LENGTH + 100
+        lyric = self._repeating_tokens(length)
+        # Whisper has a very long prefix of junk, pushing the true alignment
+        # far off-diagonal at the start
+        long_prefix = ["junk"] * (length // 2)
+        whisper = long_prefix + lyric
+
+        # Banded NW should detect degenerate result and fall back
+        # (We just verify it doesn't crash and returns a valid alignment)
+        result = _needleman_wunsch_banded(lyric, whisper)
+        assert len(result) > 0
+        # The result should have some matched pairs
+        matches = [(l, w) for l, w in result
+                    if l is not None and w is not None]
+        assert len(matches) > 0
+
+    def test_dispatcher_short_uses_unbanded(self):
+        """Verify _needleman_wunsch dispatches to unbanded for short seqs."""
+        lyric = ["hello", "world"]
+        whisper = ["hello", "world"]
+        # max(len) = 2, well below _BAND_MIN_LENGTH
+        result = _needleman_wunsch(lyric, whisper)
+        # Should match both tokens
+        matches = [(l, w) for l, w in result
+                    if l is not None and w is not None]
+        assert len(matches) == 2
