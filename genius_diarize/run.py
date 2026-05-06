@@ -29,6 +29,7 @@ from genius_diarize.word_extraction import (
     load_genius_lyrics,
     match_words_to_lines,
     match_words_to_lines_by_count,
+    match_words_to_lines_walk,
 )
 from genius_diarize.workers.whisper_worker import WhisperWorker
 
@@ -101,9 +102,9 @@ def main():
     )
     parser.add_argument(
         "--match-method",
-        choices=["nw", "count"],
+        choices=["nw", "walk", "count"],
         default="nw",
-        help="Lyric→whisper word matching: 'nw' (Needleman-Wunsch, default) or 'count' (legacy positional slicing).",
+        help="Lyric→whisper word matching: 'nw' (Needleman-Wunsch, default), 'walk' (two-pointer with gap interpolation), or 'count' (legacy positional slicing).",
     )
     args = parser.parse_args()
 
@@ -148,7 +149,12 @@ def main():
         words = extract_words(result)
         lyrics_lines = [g["text"] for g in genius_lines]
         align_lines = [g["align_text"] for g in genius_lines]
-        matcher = match_words_to_lines if args.match_method == "nw" else match_words_to_lines_by_count
+        matchers = {
+            "nw": match_words_to_lines,
+            "walk": match_words_to_lines_walk,
+            "count": match_words_to_lines_by_count,
+        }
+        matcher = matchers[args.match_method]
         logger.info(f"Matching method: {args.match_method}")
         line_objects = matcher(words, lyrics_lines, align_lines)
         reset_segment_first_flags(line_objects)
