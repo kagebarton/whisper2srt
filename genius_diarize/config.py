@@ -47,14 +47,14 @@ class GeniusDiarizeConfig:
 
     # Per-speaker colors. Index 0 → first dominant_speaker, etc.
     # Format: &HAABBGGRR& (8 hex digits, alpha + reversed RGB, trailing &).
-    # Goldenrod is reserved for ensemble; these should be distinct from it.
+    # Muted, TV-safe palette. Avoids neon colors and goldenrod ensemble color.
     speaker_colors: list = field(
         default_factory=lambda: [
-            "&H00FFFF00&",  # 0 — cyan
-            "&H00B469FF&",  # 1 — pink
-            "&H0000FF00&",  # 2 — green
-            "&H000080FF&",  # 3 — orange
-            "&H00FA82FA&",  # 4 — lavender
-            "&H000000FF&",  # 5 — red
+            "&H00A8A800&",  # 0 — muted cyan
+            "&H003232B4&",  # 1 — muted red
+            "&H0028D28C&",  # 2 — muted lime (more green)
+            "&H00A03264&",  # 3 — muted plum (more purple, darker)
+            "&H006E82A0&",  # 4 — muted sage
+            "&H006464C8&",  # 5 — muted dusty rose
         ]
     )
