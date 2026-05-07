@@ -15,18 +15,18 @@ class WhisperModelConfig:
     # --- Language / VAD ---
     language: str = "en"
     vad: bool = True
-    vad_threshold: float = 0.1        # lower = more sensitive; 0.1 catches soft vocals
+    vad_threshold: float = 0.05        # lower = more sensitive; 0.1 catches soft vocals
 
     # --- Silence handling ---
     # False: preserve timing in quiet regions (breathing, held pauses between phrases).
     # On a pre-separated vocal stem there is no background noise to suppress.
-    suppress_silence: bool = False
-    suppress_word_ts: bool = False     # keep word-level timestamps in quiet regions
+    suppress_silence: bool = True
+    suppress_word_ts: bool = True     # keep word-level timestamps in quiet regions
 
     # --- Frequency filtering ---
     # True: restrict mel features to the human vocal range (~85–3000 Hz).
     # Always beneficial on a vocal stem — removes any residual low-frequency bleed.
-    only_voice_freq: bool = True
+    only_voice_freq: bool = False
 
     # --- Transcription decoding ---
     temperature: float = 0.0          # 0 = greedy/deterministic; best for alignment accuracy
@@ -36,7 +36,24 @@ class WhisperModelConfig:
 
     # --- Word duration floor ---
     # 0.05 s allows short syllables in fast lyrics (default stable-ts is 0.1 s).
-    min_word_dur: float = 0.025
+    min_word_dur: float = 0.05
+
+    # --- Word duration ceiling ---
+    # stable-ts default is 3.0 s, which clips held notes in sung vocals.
+    # None disables global re-alignment of long words.
+    max_word_dur: float = 5.0
+
+    # --- Failure / cleanup safety nets ---
+    # If set, abort alignment when fraction of zero-duration words exceeds this.
+    failure_threshold: float | None = None
+    # Drop zero-duration words from the result instead of leaving 0-cs entries.
+    remove_instant_words: bool = True
+
+    # --- Segment grouping ---
+    # When True, stable-ts treats each '\n' in the alignment text as a segment
+    # boundary, so result.segments come back already grouped per lyric line —
+    # eliminating the need for post-hoc word→line matching. Alignment-only.
+    original_split: bool = False
 
     # --- Refinement ---
     refine_steps: str = "se"          # 's' = refine starts, 'e' = ends, 'se' = both
@@ -44,6 +61,8 @@ class WhisperModelConfig:
 
     # --- Regrouping (transcription mode only) ---
     regroup: str = ""                  # stable-ts regroup expression; empty = no regrouping
+
+    aligner='new'
 
 
 @dataclass
