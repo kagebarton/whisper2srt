@@ -1,6 +1,9 @@
 """Whisper worker: in-process stable-ts worker with per-encoder-pass cancellation.
 
-Adapted from cancel_tests/whisper/whisper_worker.py (hook-based approach).
+Forked from pipeline.workers.whisper_worker for genius_align — extended to
+wire all tuning fields exposed by ``genius_align.config.WhisperModelConfig``.
+This is the canonical version; port additions back to pipeline when proven.
+
 Key differences from the pipeline variant:
 - Uses register_forward_pre_hook() on model.encoder instead of monkey-patching
   model.encode() — whisper.model.Whisper has no .encode() method.
@@ -31,14 +34,23 @@ import os
 import subprocess
 import threading
 import time
+from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
-from pipeline.config import WhisperModelConfig
+from genius_align.config import WhisperModelConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _splat(section) -> dict[str, Any]:
+    """Convert a dataclass section to kwargs, dropping None values.
+
+    None means 'unset' — fall back to stable-ts's own default.
+    """
+    return {k: v for k, v in asdict(section).items() if v is not None}
 
 
 class _CancelledInsideEncoder(Exception):
@@ -106,18 +118,17 @@ class WhisperWorker:
 
         import stable_whisper
 
-        device = self._config.device
+        load_kwargs = _splat(self._config.load_model)
+        model_source = load_kwargs.pop("model_path")
+        device = load_kwargs.pop("device", "auto")
         if device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
+        load_kwargs["device"] = device
 
-        model_source = self._config.model_path
         logger.info(f"Loading whisper model: {model_source} on {device}")
         start = time.time()
 
-        self._model = stable_whisper.load_model(
-            model_source,
-            device=device,
-        )
+        self._model = stable_whisper.load_model(model_source, **load_kwargs)
 
         # Cache the encoder nn.Module for hook registration.
         # stable_whisper.load_model() returns whisper.model.Whisper directly —
@@ -318,15 +329,7 @@ class WhisperWorker:
         if self._model is None:
             raise RuntimeError("Model not loaded — call load_model() first")
 
-        align_kwargs = dict(
-            language=self._config.language,
-            vad=self._config.vad,
-            vad_threshold=self._config.vad_threshold,
-            suppress_silence=self._config.suppress_silence,
-            suppress_word_ts=self._config.suppress_word_ts,
-            only_voice_freq=self._config.only_voice_freq,
-            min_word_dur=self._config.min_word_dur,
-        )
+        align_kwargs = _splat(self._config.align)
 
         if cancel_event is None:
             return self._model.align(str(vocal_path), lyrics_text, **align_kwargs)
@@ -392,10 +395,7 @@ class WhisperWorker:
         if self._model is None:
             raise RuntimeError("Model not loaded — call load_model() first")
 
-        refine_kwargs = dict(
-            steps=self._config.refine_steps,
-            word_level=self._config.refine_word_level,
-        )
+        refine_kwargs = _splat(self._config.refine)
 
         if cancel_event is None:
             return self._model.refine(str(vocal_path), result, **refine_kwargs)
@@ -464,6 +464,19 @@ class WhisperWorker:
         # refine — the whole song is discarded on cancellation.
 
         refined = self.refine(vocal_path, result, cancel_event)
+
+        # --- Post-processing (path-dependent, driven by config) ---
+        pp = self._config.post_process
+        if pp.adjust_gaps_threshold is not None:
+            logger.debug(
+                f"Post-process: adjust_gaps(duration_threshold={pp.adjust_gaps_threshold})"
+            )
+            refined = refined.adjust_gaps(duration_threshold=pp.adjust_gaps_threshold)
+
+        if pp.merge_by_gap_min is not None:
+            logger.debug(f"Post-process: merge_by_gap(min_gap={pp.merge_by_gap_min})")
+            refined = refined.merge_by_gap(min_gap=pp.merge_by_gap_min)
+
         return refined
 
     def transcribe(
@@ -487,21 +500,7 @@ class WhisperWorker:
         if self._model is None:
             raise RuntimeError("Model not loaded — call load_model() first")
 
-        transcribe_kwargs = dict(
-            language=self._config.language,
-            vad=self._config.vad,
-            vad_threshold=self._config.vad_threshold,
-            suppress_silence=self._config.suppress_silence,
-            suppress_word_ts=self._config.suppress_word_ts,
-            only_voice_freq=self._config.only_voice_freq,
-            condition_on_previous_text=self._config.condition_on_previous_text,
-            temperature=self._config.temperature,
-            beam_size=self._config.beam_size,
-            min_word_dur=self._config.min_word_dur,
-            word_timestamps=True,
-        )
-        if self._config.initial_prompt:
-            transcribe_kwargs["initial_prompt"] = self._config.initial_prompt
+        transcribe_kwargs = _splat(self._config.transcribe)
 
         if cancel_event is None:
             return self._model.transcribe(str(vocal_path), **transcribe_kwargs)
