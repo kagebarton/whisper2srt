@@ -119,8 +119,11 @@ class TranscribeKwargs:
     # False avoids hallucination/skip cascades when one segment goes wrong.
     condition_on_previous_text: bool = False
 
-    # Optional text hint to guide style/vocab.
-    initial_prompt: str | None = None
+    # Optional text hint to guide style/vocab. Generic on purpose — a
+    # full-lyrics prompt would bias the decoder toward the expected text
+    # and undermine the tiling path's honest "what was actually sung"
+    # account (remixes, ad-libs, dropped verses).
+    initial_prompt: str | None = "Song lyrics with casual contractions."
 
 
 @dataclass
@@ -188,6 +191,14 @@ class GeniusAlignConfig:
     """Top-level config: whisper sub-config + flat caption styling."""
 
     whisper: WhisperModelConfig = field(default_factory=WhisperModelConfig)
+
+    # Auto match-method gate (used only by --match-method=auto). After the
+    # walk path runs stable-ts align(), if the fraction of segments stable-ts
+    # reported as "failed to align" exceeds this, run.py discards the walk
+    # result and re-runs with the tiling matcher on an honest transcription.
+    # A high failure rate means align()'s forced word placement is unreliable.
+    # 0.1 → escalate once >10% of segments failed (e.g. 7/48 ≈ 0.15 escalates).
+    align_failure_escalation: float = 0.1
 
     # ASS karaoke styling
     font_name: str = "Arial"

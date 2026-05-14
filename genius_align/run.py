@@ -5,7 +5,15 @@ Usage:
 
 Modes:
     Alignment (default when lyrics_file supplied):
-        Walk match with gap interpolation between confirmed lyrics and audio.
+        --match-method auto   (default): run the walk path, but if stable-ts
+            align() reports too many failed segments
+            (> cfg.align_failure_escalation), discard it and re-run with the
+            tiling matcher on an honest transcription.
+        --match-method walk:   stable-ts align() + two-pointer walk matcher
+            with gap interpolation. Trusts word order; covers every line.
+        --match-method tiling: stable-ts transcribe() + order-independent
+            fuzzy candidate + interval-scheduling DP. Resilient to
+            remixes/repeats/drift; may drop unmatched lines.
     Transcription (when lyrics_file omitted):
         Open-ended transcription with regrouping for natural line breaks.
 
@@ -31,6 +39,7 @@ from genius_align.word_extraction import (
     load_genius_lyrics,
     match_words_to_lines_walk,
 )
+from genius_align.tiling_match import match_words_to_lines_tiling
 from genius_align.workers.whisper_worker import WhisperWorker
 
 logging.basicConfig(
@@ -44,8 +53,14 @@ logger = logging.getLogger("genius_align.run")
 def assign_speakers_from_genius(line_objects, genius_lines):
     """Copy speaker_label and dominant_speaker from each genius_line onto
     the matching line_obj (and onto every word). Modifies in place.
+
+    The walk matcher emits line_objects 1:1 with genius_lines, so a
+    positional index works. The tiling matcher may drop or repeat lines
+    and tags each object with a ``line_id`` back-reference — map by that
+    when present.
     """
-    for line_obj, gl in zip(line_objects, genius_lines):
+    for idx, line_obj in enumerate(line_objects):
+        gl = genius_lines[line_obj.get("line_id", idx)]
         line_obj["speaker"] = gl["speaker_label"]
         line_obj["dominant_speaker"] = gl["dominant_speaker"]
         for word in line_obj["words"]:
@@ -112,8 +127,22 @@ def main():
         default=None,
         help="Genius-formatted lyrics file (.txt) with section headers. Omit for transcription mode.",
     )
-    # Note: --match-method was removed; walk is the only supported matcher.
-    # This flag is kept temporarily for backward compatibility but ignored.
+    parser.add_argument(
+        "--match-method",
+        choices=["auto", "walk", "tiling"],
+        default="auto",
+        help=(
+            "Lyric→token matcher (alignment mode only). "
+            "'auto' (default): run 'walk', but escalate to 'tiling' if "
+            "stable-ts align() fails more than cfg.align_failure_escalation "
+            "of its segments. "
+            "'walk': runs stable-ts align() then a two-pointer lockstep "
+            "matcher that trusts word order and covers every lyric line. "
+            "'tiling': runs stable-ts transcribe() then an order-independent "
+            "fuzzy candidate + interval-scheduling DP — resilient to "
+            "remixes/repeats/drift, may drop unmatched lines."
+        ),
+    )
     parser.add_argument(
         "--save-whisper",
         action="store_true",
@@ -133,7 +162,9 @@ def main():
         sys.exit(1)
 
     cfg = GeniusAlignConfig()
-    logger.info(f"Mode: {'transcription' if is_transcribe_mode else 'walk'}")
+    logger.info(
+        f"Mode: {'transcription' if is_transcribe_mode else args.match_method}"
+    )
 
     # --- Parse lyrics (single source of truth) ---
     if is_transcribe_mode:
@@ -156,25 +187,72 @@ def main():
 
     try:
         if is_transcribe_mode:
-            # --- Transcribe ---
+            # --- Transcribe pipeline: transcribe → regroup → refine ---
             logger.info(f"Transcribing: {vocal_path.name}")
-            result = whisper_worker.transcribe_and_refine(vocal_path)
+            result = whisper_worker.transcribe(vocal_path)
+            whisper_worker.regroup(result)
+            result = whisper_worker.refine(vocal_path, result)
             line_objects = _segments_to_line_objects(
                 result, min_prob=cfg.whisper.post_process.min_word_probability
             )
         else:
             # --- Align ---
-            logger.info(f"Aligning lyrics: {lyrics_path.name} → {vocal_path.name}")
-
-            result = whisper_worker.align_and_refine(vocal_path, plain_text)
-            words = extract_words(
-                result, min_prob=cfg.whisper.post_process.min_word_probability
-            )
             lyrics_lines = [g["text"] for g in genius_lines]
             align_lines = [g["align_text"] for g in genius_lines]
-            line_objects = match_words_to_lines_walk(
-                words, lyrics_lines, align_lines
-            )
+            min_prob = cfg.whisper.post_process.min_word_probability
+
+            use_tiling = args.match_method == "tiling"
+
+            if not use_tiling:
+                # walk / auto: run align() first and gate on its failure
+                # ratio *before* refine — refine is the expensive stage and
+                # is wasted work if we're about to discard the align result.
+                logger.info(
+                    f"Aligning lyrics: {lyrics_path.name} → {vocal_path.name}"
+                )
+                result = whisper_worker.align(vocal_path, plain_text)
+                fail_ratio = whisper_worker.last_align_failure_ratio
+                if (
+                    args.match_method == "auto"
+                    and fail_ratio > cfg.align_failure_escalation
+                ):
+                    logger.warning(
+                        "align() failed %.0f%% of segments (> %.0f%% threshold) "
+                        "— escalating to tiling matcher (skipping refine)",
+                        fail_ratio * 100,
+                        cfg.align_failure_escalation * 100,
+                    )
+                    use_tiling = True
+                else:
+                    if args.match_method == "auto":
+                        logger.info(
+                            "align() failure ratio %.0f%% within threshold "
+                            "— keeping walk match",
+                            fail_ratio * 100,
+                        )
+                    # walk pipeline: refine → postprocess → walk match
+                    result = whisper_worker.refine(vocal_path, result)
+                    result = whisper_worker.postprocess(result)
+                    words = extract_words(result, min_prob=min_prob)
+                    line_objects = match_words_to_lines_walk(
+                        words, lyrics_lines, align_lines
+                    )
+
+            if use_tiling:
+                # Tiling is order-independent and drops unmatched lines, so it
+                # runs on an honest transcription rather than align() output.
+                # align() force-places every reference token, collapsing
+                # unalignable lyrics into zero-duration slots — feeding that
+                # into the tiling matcher would just launder corrupted timing.
+                # tiling pipeline: transcribe → regroup → refine → tiling match
+                logger.info(f"Transcribing for tiling match: {vocal_path.name}")
+                result = whisper_worker.transcribe(vocal_path)
+                whisper_worker.regroup(result)
+                result = whisper_worker.refine(vocal_path, result)
+                words = extract_words(result, min_prob=min_prob)
+                line_objects = match_words_to_lines_tiling(
+                    words, lyrics_lines, align_lines
+                )
 
             # --- original_split=True path (preserved for reference) ---
             # Requires strict 1:1 segment→line mapping; uses

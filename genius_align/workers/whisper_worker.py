@@ -7,8 +7,12 @@ This is the canonical version; port additions back to pipeline when proven.
 Key differences from the pipeline variant:
 - Uses register_forward_pre_hook() on model.encoder instead of monkey-patching
   model.encode() — whisper.model.Whisper has no .encode() method.
-- align_and_refine() does NOT clear the cancel_event between phases — a single
-  cancel signal propagates through both (production: whole song is discarded).
+- Exposes each stage individually (align, transcribe, regroup, refine,
+  postprocess) rather than combined align_and_refine/transcribe_and_refine
+  wrappers — run.py composes the stages it needs per match-method, and the
+  --match-method=auto gate gates between align() and refine(). Callers pass
+  the same cancel_event to each stage, so a cancel propagates across all of
+  them (production: whole song is discarded).
 
 Unlike the StemWorker (which runs audio-separator in a subprocess), this
 worker runs stable-ts in the same process. Cancellation is done by
@@ -31,9 +35,11 @@ We prevent this by:
 import gc
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
+import warnings
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
@@ -44,6 +50,12 @@ from genius_align.config import WhisperModelConfig
 
 logger = logging.getLogger(__name__)
 
+# stable-ts emits "<n>/<m> segments failed to align." as a UserWarning at the
+# end of Aligner.align(). The align() wrapper captures and parses it so run.py
+# can auto-escalate to the tiling matcher: a high failure ratio means align()'s
+# forced word placement is untrustworthy.
+_ALIGN_FAILURE_RE = re.compile(r"(\d+)\s*/\s*(\d+)\s+segments failed to align")
+
 
 def _splat(section) -> dict[str, Any]:
     """Convert a dataclass section to kwargs, dropping None values.
@@ -51,6 +63,23 @@ def _splat(section) -> dict[str, Any]:
     None means 'unset' — fall back to stable-ts's own default.
     """
     return {k: v for k, v in asdict(section).items() if v is not None}
+
+
+def _extract_align_failure_ratio(caught_warnings) -> float:
+    """Scan captured warnings for stable-ts's 'N/M segments failed to align'
+    message and return N/M. Every captured warning is re-logged so capturing
+    them here doesn't hide them from the user. Returns 0.0 if not found.
+    """
+    ratio = 0.0
+    for w in caught_warnings:
+        msg = str(w.message)
+        m = _ALIGN_FAILURE_RE.search(msg)
+        if m:
+            failed, total = int(m.group(1)), int(m.group(2))
+            if total > 0:
+                ratio = failed / total
+        logger.warning("%s: %s", w.category.__name__, msg)
+    return ratio
 
 
 class _CancelledInsideEncoder(Exception):
@@ -100,10 +129,19 @@ class WhisperWorker:
         self._model_loaded = False
         self._encoder_module = None
         self._audioloader_patched = False
+        self._last_align_failure_ratio: float = 0.0
 
     @property
     def model_loaded(self) -> bool:
         return self._model is not None and self._model_loaded
+
+    @property
+    def last_align_failure_ratio(self) -> float:
+        """Fraction of segments stable-ts reported as failed in the most
+        recent ``align()`` call. 0.0 if align hasn't run, none failed, or
+        the warning could not be parsed.
+        """
+        return self._last_align_failure_ratio
 
     def load_model(self) -> None:
         """Load the PyTorch whisper model via stable-ts.
@@ -311,6 +349,26 @@ class WhisperWorker:
         lyrics_text: str,
         cancel_event: Optional[threading.Event] = None,
     ):
+        """Run align() and capture stable-ts's segment-failure warning.
+
+        Thin wrapper over ``_align()`` that records the
+        "N/M segments failed to align" UserWarning into
+        ``last_align_failure_ratio``, so callers can decide whether align()'s
+        forced word placement is trustworthy *before* spending time on
+        refine().
+        """
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = self._align(vocal_path, lyrics_text, cancel_event)
+        self._last_align_failure_ratio = _extract_align_failure_ratio(caught)
+        return result
+
+    def _align(
+        self,
+        vocal_path: Path,
+        lyrics_text: str,
+        cancel_event: Optional[threading.Event] = None,
+    ):
         """Run model.align() with per-encode-pass cancellation.
 
         Args:
@@ -438,46 +496,26 @@ class WhisperWorker:
                 pass
             logger.debug(f"Removed encoder hook ({encode_counter[0]} encode passes)")
 
-    def align_and_refine(
-        self,
-        vocal_path: Path,
-        lyrics_text: str,
-        cancel_event: Optional[threading.Event] = None,
-    ):
-        """Run align() then refine() with cancellation support.
+    def postprocess(self, result):
+        """Apply config-driven WhisperResult post-processing.
 
-        Both operations share the same cancel_event. In the pipeline,
-        a cancelled song is discarded entirely — no partial outputs are
-        kept and no further stages run — so a cancel signal during align
-        must propagate through refine rather than being swallowed.
-
-        Returns:
-            WhisperResult on success.
-
-        Raises:
-            AlignmentCancelledError: If either align or refine was cancelled.
+        Each ``PostProcessKwargs`` field drives a separate WhisperResult
+        call. A discrete stage (not folded into ``refine()``) so the
+        transcribe pipeline can refine without it: ``run.py`` composes the
+        stages it needs per match-method.
         """
-        result = self.align(vocal_path, lyrics_text, cancel_event)
-
-        # NOTE: No cancel_event.clear() between align and refine.
-        # In the pipeline, a cancel during align should propagate through
-        # refine — the whole song is discarded on cancellation.
-
-        refined = self.refine(vocal_path, result, cancel_event)
-
-        # --- Post-processing (path-dependent, driven by config) ---
         pp = self._config.post_process
         if pp.adjust_gaps_threshold is not None:
             logger.debug(
                 f"Post-process: adjust_gaps(duration_threshold={pp.adjust_gaps_threshold})"
             )
-            refined = refined.adjust_gaps(duration_threshold=pp.adjust_gaps_threshold)
+            result = result.adjust_gaps(duration_threshold=pp.adjust_gaps_threshold)
 
         if pp.merge_by_gap_min is not None:
             logger.debug(f"Post-process: merge_by_gap(min_gap={pp.merge_by_gap_min})")
-            refined = refined.merge_by_gap(min_gap=pp.merge_by_gap_min)
+            result = result.merge_by_gap(min_gap=pp.merge_by_gap_min)
 
-        return refined
+        return result
 
     def transcribe(
         self,
@@ -543,25 +581,18 @@ class WhisperWorker:
                 pass
             logger.debug(f"Removed encoder hook ({encode_counter[0]} encode passes)")
 
-    def transcribe_and_refine(
-        self,
-        vocal_path: Path,
-        cancel_event: Optional[threading.Event] = None,
-    ):
-        """Run transcribe() then refine() with cancellation support.
+    def regroup(self, result):
+        """Apply the configured stable-ts regroup expression in place.
 
-        Returns:
-            WhisperResult on success.
-
-        Raises:
-            AlignmentCancelledError: If either phase was cancelled.
+        Used by the transcribe pipeline only — the align pipeline keeps
+        reference-driven segmentation. No-op if ``cfg.regroup`` is empty.
+        Returns ``result`` for call-site composability (stable-ts'
+        ``regroup()`` mutates in place and returns self).
         """
-        result = self.transcribe(vocal_path, cancel_event)
         if self._config.regroup:
             logger.info(f"Regrouping transcription segments: {self._config.regroup}")
             result.regroup(self._config.regroup)
-        refined = self.refine(vocal_path, result, cancel_event)
-        return refined
+        return result
 
     def unload_model(self) -> None:
         """Unload the model and free GPU memory."""
