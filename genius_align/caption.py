@@ -29,16 +29,21 @@ def generate_srt(line_objects, cfg):
     imprecise, and a wrong inline name reads as an authoritative claim.
     The ASS output still carries per-speaker color for visual cueing.
     """
+    # Skip lines suppressed by the walk matcher's interp cap (start=None).
     subs = []
-    for i, line in enumerate(line_objects, start=1):
+    index = 1
+    for line in line_objects:
+        if line["start"] is None:
+            continue
         subs.append(
             srt.Subtitle(
-                index=i,
+                index=index,
                 start=datetime.timedelta(seconds=line["start"]),
                 end=datetime.timedelta(seconds=line["end"]),
                 content=line["text"],
             )
         )
+        index += 1
     return srt.compose(subs)
 
 
