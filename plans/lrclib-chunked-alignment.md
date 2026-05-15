@@ -193,7 +193,50 @@ tests, with `blood.m4a` as the real fixture.
 
 ### Phase 2 — section chunking
 
-- Line-level reconciliation (the fresh aligner above).
+**Integration shift.** Phase 1 hands off to `genius_align` via
+`subprocess.call([sys.executable, "-m", "genius_align", ...])`. Phase 2
+needs per-chunk control of `align()`, so this is replaced by
+**library-level imports** of `genius_align` modules from inside
+`lrclib_align/run.py`. The "no edits to `genius_align`" rule still
+holds — Phase 2 only *imports* it. Prerequisite: a reuse audit
+confirming the following surface is importable without changes:
+- `genius_align.config.GeniusAlignConfig`
+- `genius_align.workers.whisper_worker.WhisperWorker` (uses
+  `load_model`/`align`/`refine`/`postprocess`/`transcribe`/`regroup`/
+  `unload_model`; reload across chunks would be prohibitive, so the
+  worker is loaded once and reused).
+- `genius_align.word_extraction.{extract_words,load_genius_lyrics,
+  match_words_to_lines_walk}`
+- `genius_align.tiling_match.match_words_to_lines_tiling`
+- `genius_align.genius.genius_singer_mode`
+- `genius_align.caption.{generate_srt,generate_ass}`
+- `genius_align.run.assign_speakers_from_genius`
+
+**Input.** Phase 2 reads the Phase 1 sidecar
+`<vocal_stem>.lrclib.json` (or accepts the equivalent in-memory bundle
+from `run.py`). Keys consumed: `lrclib.synced_lyrics` (the LRC string),
+`lrclib.duration`, `genius.title`, `genius.artist`, `file_duration`,
+`lrclib.source` (logged when surprising chunk-boundary behaviour shows
+up — `variant-sweep` / `search-backstop` spines are fuzzier than
+`primary`). The `<vocal_stem>.genius.txt` written by Phase 1 has already
+been run through `_strip_genius_chrome` (drops everything before the
+first `[Section]` header, trims `\d*Embed` trailer) — so
+`genius_align.genius.parse_genius_sections` sees clean Genius input with
+section headers preserved, which is exactly what it expects.
+
+**New module: `lrc.py`.** Parse `[mm:ss.cc] text` lines out of
+`lrclib.synced_lyrics`. Returns `[{start: float, text: str}, ...]`.
+Blank-text stamps (LRCLIB sometimes emits trailing empties as section
+markers) are kept — they're useful end-of-section anchors. Multi-stamp
+lines (`[00:01.00][00:30.00] chorus`) split into one entry per stamp.
+
+**Reconciliation.** Line-level aligner (the fresh aligner above), in
+`reconcile.py`. There is no separate "weak match" tier — `find_match`
+returns `None` for any below-tolerance result, and the caller falls
+through to tier 2 (whole-song tiling). If a third confidence tier is
+later wanted, add a `confidence: float` field to `LrclibMatch`; do not
+re-introduce the silent weak path.
+
 - Derive section boundaries from Genius `[Verse]`/`[Chorus]` headers,
   timed via reconciled LRCLIB stamps. Sections **are** the chunks —
   no size targeting.
@@ -203,16 +246,18 @@ tests, with `blood.m4a` as the real fixture.
   with. No upper bound — a long verse is still a bounded chunk, which
   is the whole point.
 - **Overlap pad:** 1.5s on each side (clamped to chunk boundaries at
-  song start/end). Implemented via stable-ts `clip_timestamps` if
-  available, else by cutting the stem with `ffmpeg`.
+  song start/end). Implemented by cutting the stem with `ffmpeg` to a
+  temp WAV per chunk (simplest reuse path — stable-ts inside
+  `WhisperWorker` then runs unmodified against the bounded file).
 - Per-chunk `align()` on bounded audio + that section's text; check
   `last_align_failure_ratio` per chunk; escalate only the failed chunk
   to tiling.
-- **Stitch:** offset timestamps to absolute, concatenate `line_objects`.
-  Overlap-pad dedup: for words landing in the overlap region, keep the
-  copy whose midpoint is nearer its chunk center; on exact tie, keep the
-  earlier chunk's.
-- Speaker assignment + SRT/ASS generation reused from `genius_align`.
+- **Stitch:** offset timestamps to absolute (add chunk start), then
+  concatenate `line_objects`. Overlap-pad dedup: for words landing in
+  the overlap region, keep the copy whose midpoint is nearer its chunk
+  center; on exact tie, keep the earlier chunk's.
+- Speaker assignment + SRT/ASS generation reused from `genius_align`
+  (`assign_speakers_from_genius` + `generate_srt` / `generate_ass`).
 
 ### Phase 3 — line-time anchoring
 
