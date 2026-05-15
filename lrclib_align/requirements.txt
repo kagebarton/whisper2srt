@@ -1,0 +1,3 @@
+# Phase 1 deps. (rapidfuzz lands in Phase 2 for reconcile.py.)
+requests>=2.31
+lyricsgenius>=3.0
