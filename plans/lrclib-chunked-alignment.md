@@ -75,16 +75,77 @@ automatic.
 2. Query Genius, present the **top 10 results** for the user to pick one.
 3. Fetch the chosen result's lyrics + metadata (`title`, `artist`).
 4. `ffprobe` the video/vocal file for exact duration.
-5. Query LRCLIB `/api/get` with cleaned `title` + `artist` + duration.
-   On 404, fall back to `/api/search` and pick the candidate whose
-   `duration` is closest to the file; reject if nothing within tolerance.
+5. **Sweep `/api/get`** with cleaned `title` + `artist`, varying the
+   `duration` param across a window around the file's true duration `D`.
+   Collect unique returned rows; pick the one whose `duration` is
+   closest to `D`. If the sweep returns nothing, fall back to
+   `/api/search` as a variant-discovery backstop (it may surface an
+   alternate title/artist spelling); otherwise, if the sweep returned
+   rows but none are within the acceptable band, that's a weak match.
 6. No LRCLIB match (or weak match) → log and fall through to tier 2.
 
-Title normalization: strip parentheticals, `feat.`/`ft.`, `- Live`,
-remaster tags on **both** sides before comparing; duration is the
-disambiguator when strings still disagree.
+**Why sweep `/api/get` instead of trusting `/api/search`.** LRCLIB's
+`/api/get` is a duration-keyed lookup with ~±2s buckets per call: each
+distinct duration value returns the closest-indexed recording within
+that narrow window, and stepping the param exposes *different* track
+ids. `/api/search` caps at 20 results ranked by relevance and silently
+ignores any `duration` param — popular studio versions crowd out live /
+remix / shortened mixes for the same title, even when those mixes are
+the actual file in hand (the `blood.m4a` case). Sweeping `/api/get`
+turns the endpoint into a range query and surfaces buried recordings
+directly.
 
-No caching of the LRCLIB response for now.
+**Duration sweep parameters** (constants in `lrclib_align/lrclib.py`,
+tunable later):
+- Window: ±10s around the file duration (`SWEEP_WINDOW`).
+- Step: 2s (`SWEEP_STEP`; ≈ one `/api/get` bucket per probe; 11 calls
+  per sweep).
+- Acceptable Δ: ≤10s = match; >10s on closest scanned row = weak
+  (`ACCEPTABLE_DELTA`). Wide enough to absorb the
+  intro/outro/applause variance between a studio recording and a live
+  cut of the same arrangement.
+- Max related-artist variants probed on escalation: 4
+  (`MAX_ARTIST_VARIANTS`).
+- HTTP timeout: 15s (`_HTTP_TIMEOUT`). LRCLIB has been observed
+  responding at 10–15s under load; a tighter timeout starves all probes.
+
+**Artist-variant escalation.** LRCLIB indexes the same recording under
+multiple artist strings (e.g. "Ed Sheeran", "Ed Sheeran & Rudimental",
+"Rudimental feat. Ed Sheeran"). Escalation trigger is **no within-
+tolerance row** under the primary artist — an empty primary sweep AND
+a primary sweep that only found out-of-tolerance rows both escalate.
+We then do a title-only `/api/search`, harvest distinct artist names
+that share a token-piece with the base (split on `&`, `,`, `/`,
+`feat.`/`ft.`, `vs`, `x`), and re-sweep `/api/get` under each variant
+up to `MAX_ARTIST_VARIANTS`. **Short-circuit:** as soon as any variant
+produces a row within tolerance, remaining variants are skipped. The
+title-only search ranks variants by relevance, so popular ones come
+first and the short-circuit usually keeps the variant cost low.
+
+**Final backstop.** If neither the primary sweep nor any probed
+variant lands a within-tolerance row, run `/api/search` once with both
+title and artist filters as a last resort. If even that doesn't yield
+a within-tolerance row, return None — caller falls through to tier 2.
+
+**Title normalization** (apply to both Genius title and LRCLIB candidate
+title before comparing):
+- Lowercase.
+- Strip trailing parentheticals: `(feat. ...)`, `(with ...)`,
+  `(... Remaster[ed])`, `(... Version)`, `(Live[ at ...])`,
+  `(Acoustic)`, `(Remix)`.
+- Strip trailing `- Remaster[ed] YYYY?`, `- Live`, `- Single Version`,
+  `- Radio Edit` after a dash.
+- Strip `feat.`/`ft.`/`featuring ...` from anywhere.
+- Collapse whitespace.
+- Strings still disagreeing → duration is the disambiguator.
+
+**LRCLIB client:** inline `requests`-based wrapper in
+`lrclib_align/lrclib.py` (~30 lines covering `/api/get` + `/api/search`).
+`lrclib-python` on PyPI looks like the natural choice but every released
+version (0.1–0.4.2) contains nested same-quote f-strings that require
+Python ≥3.12; the `pik` env is on 3.11, so it fails to import. Rolling
+our own is simpler than upgrading the env or pinning a different
+library. No auth needed; no caching of the response for now.
 
 ## Reconciliation algorithm — write fresh (recommendation)
 
@@ -95,38 +156,62 @@ different problem: both sides are *clean* lyric text, at *line*
 granularity, and the goal is fuzzy line-similarity matching with
 gap-runs, not token equality against noise.
 
-Write a small dedicated line-level aligner: normalized line similarity
-(token-set ratio or similar) + two-pointer/DP with gap runs. It is the
-highest-risk new component — bad reconciliation poisons every chunk
-boundary — so it gets its own module and its own golden-output tests,
-with `blood.m4a` as the real fixture.
+Write a small dedicated line-level aligner:
+
+- **Similarity:** `rapidfuzz.fuzz.token_set_ratio` on lowercased,
+  punctuation-stripped lines. Threshold: ≥75 = match, 60–75 = weak
+  (match only if both neighbors agree), <60 = no match.
+- **Algorithm:** Needleman–Wunsch over lines (match = +similarity,
+  gap = small negative). Produces an alignment with gap runs on either
+  side.
+- **Contiguous-run threshold (cut section):** ≥3 consecutive unmatched
+  Genius lines bounded by matched lines on both sides → treat as
+  deliberately cut from this mix; drop from alignment.
+- **Isolated unmatched (≤2):** keep the Genius line; interpolate timing
+  from neighbors.
+
+It is the highest-risk new component — bad reconciliation poisons every
+chunk boundary — so it gets its own module and its own golden-output
+tests, with `blood.m4a` as the real fixture.
 
 ## Phasing
 
 ### Phase 1 — fetch + duration gate (low risk, independently valuable)
 
 - Interactive Genius search (prompt → top 10 → select → fetch lyrics +
-  metadata).
+  metadata). Implemented in `lrclib_align/search.py`; if
+  `genius_align/genius.py` lacks a `/search` call, add it here, do not
+  modify `genius_align`.
 - `ffprobe` duration probe.
-- LRCLIB fetch (`/api/get` → `/api/search` fallback → tolerance reject).
-- Duration comparison: close → proceed; large mismatch → warn / abort /
-  suggest tier-2. No chunking yet — Phase 1 still runs the existing
-  whole-song alignment, it just adds the gate + the fetched synced data.
-- Output: a validated `(genius_lyrics, lrclib_synced, durations)` bundle.
+- LRCLIB fetch: duration-sweep `/api/get` → optional `/api/search`
+  backstop → tolerance reject (per the sweep parameters above).
+- **Scope of Phase 1 output:** still runs the existing whole-song
+  alignment end-to-end (SRT/ASS); the only new behavior is the gate +
+  the fetched bundle logged/saved for Phase 2 to consume. No chunking
+  yet, no behavioral change when LRCLIB matches.
+- Bundle shape: `(genius_lyrics, lrclib_synced, durations)`.
 
 ### Phase 2 — section chunking
 
 - Line-level reconciliation (the fresh aligner above).
 - Derive section boundaries from Genius `[Verse]`/`[Chorus]` headers,
-  timed via reconciled LRCLIB stamps; merge tiny sections to ~15–40s.
-- Cut the vocal stem per chunk with ~1–2s overlap pad (or stable-ts
-  `clip_timestamps`).
+  timed via reconciled LRCLIB stamps. Sections **are** the chunks —
+  no size targeting.
+- **Floor-merge only:** if a section is <8s (e.g. a one-line `[Intro]`),
+  merge it into the next section. Rationale: per-chunk `align()` has
+  fixed overhead and very short audio gives the matcher little to work
+  with. No upper bound — a long verse is still a bounded chunk, which
+  is the whole point.
+- **Overlap pad:** 1.5s on each side (clamped to chunk boundaries at
+  song start/end). Implemented via stable-ts `clip_timestamps` if
+  available, else by cutting the stem with `ffmpeg`.
 - Per-chunk `align()` on bounded audio + that section's text; check
   `last_align_failure_ratio` per chunk; escalate only the failed chunk
   to tiling.
-- Stitch: offset timestamps to absolute, concatenate `line_objects`,
-  de-dup words landing in overlap pads (keep the copy nearer chunk
-  center).
+- **Stitch:** offset timestamps to absolute, concatenate `line_objects`.
+  Overlap-pad dedup: for words landing in the overlap region, keep the
+  copy whose midpoint is nearer its chunk center; on exact tie, keep the
+  earlier chunk's.
 - Speaker assignment + SRT/ASS generation reused from `genius_align`.
 
 ### Phase 3 — line-time anchoring
@@ -148,6 +233,37 @@ with `blood.m4a` as the real fixture.
 - **"LRCLIB found" is confidence-gated**, not mere presence — weak match
   logs and falls through rather than trusting a shaky spine.
 
+## Prerequisites (resolve before coding)
+
+- **`genius_align/genius.py` search capability** — confirm it has (or
+  add) a function that takes free text and returns the top-10 Genius
+  hits with `title`, `primary_artist`, `id`, `url`. Today it appears to
+  parse a known URL/file.
+- **`ffprobe` on `$PATH` in the `pik` conda env** — verify (the
+  `audio-separator` pipeline implies it, but confirm).
+- **New deps in `lrclib_align/requirements.txt`:**
+  - `requests` — LRCLIB HTTP (inline client; see note above).
+  - `lyricsgenius` — Genius search + lyrics fetch.
+  - `rapidfuzz` — line-similarity scoring in `reconcile.py` (Phase 2).
+- **`GENIUS_API_TOKEN` env var** — required by `lyricsgenius`.
+- **Test fixtures committed/available:**
+  - `blood.m4a` + its Genius lyrics + expected golden reconciliation
+    output (cut-section case).
+  - One clean-match song (LRCLIB exact hit, no cuts) for happy-path
+    golden test.
+- **No-LRCLIB regression baseline** — before any change that could
+  perturb output, capture frozen `genius_align` SRT/ASS for a chosen
+  song; this becomes the byte-identical comparison fixture.
+- **`genius_align` is frozen** — do not modify it. `lrclib_align`
+  imports/calls it as-is. Audit `caption.py`,
+  `workers/whisper_worker.py`, walk/tiling matchers for hardcoded
+  relative paths or `__main__`-only assumptions that block import from
+  a sibling package; if any block reuse, work around them inside
+  `lrclib_align` (thin wrapper, subprocess invocation, or local
+  re-implementation) rather than editing `genius_align`.
+- **CLI-only scope** — Phase 1–3 ship as CLI (`python -m lrclib_align`);
+  no integration with the `mpv/` mixer web app in scope.
+
 ## Layout
 
 ```
@@ -160,5 +276,7 @@ lrclib_align/            # new, repo-root prototype — does not touch genius_al
   run.py                 # orchestration; reuses genius_align caption/workers
 ```
 
-Reuse from `genius_align` where unchanged: `workers/whisper_worker.py`,
-`caption.py`, `genius.py` parsing, the walk/tiling matchers.
+Reuse from `genius_align` **as-is, no edits**:
+`workers/whisper_worker.py`, `caption.py`, `genius.py` parsing, the
+walk/tiling matchers. If something there blocks reuse, wrap or
+re-implement inside `lrclib_align` — never patch `genius_align`.
