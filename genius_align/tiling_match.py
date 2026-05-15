@@ -17,17 +17,67 @@ Two phases (see plans/lyric-alignment-algorithm.md):
   2. best_tiling — weighted interval scheduling DP over the candidate
      intervals, O(m log m).
 
+Before matching, lyric lines are split into *match units*: most lines yield
+one unit, but a line with parenthetical phrases ("main (backing vocal)")
+splits into the main phrase + each parenthetical as separate units — a
+parenthetical is typically a simultaneous backing vocal that whisper
+transcribes as its own run, never contiguous with the main phrase.
+
 Output line_objects carry a ``line_id`` back-reference into ``lines`` (the
-same lyric line may appear zero times or many times), so downstream speaker
-assignment maps by index rather than positional zip.
+same lyric line may appear zero times or many times — dropped, repeated, or
+split across parenthetical units), so downstream speaker assignment maps by
+index rather than positional zip.
 """
 
 import logging
+import re
 from bisect import bisect_right
 
 from genius_align.word_extraction import _normalize_token, _walk_align
 
 logger = logging.getLogger(__name__)
+
+# Parenthetical phrases — typically simultaneous backing vocals — are split
+# into their own match units (see _split_paren_units).
+_PAREN_RE = re.compile(r"\(([^()]*)\)")
+
+
+def _split_paren_units(text: str) -> list:
+    """Split a lyric line into match units on parenthetical phrases.
+
+    "All the voices in my mind (Tell me when it kicks in)" yields
+    ["All the voices in my mind", "Tell me when it kicks in"]. A
+    parenthetical is usually a simultaneous backing vocal that whisper
+    transcribes as its own run, never contiguous with the main phrase, so
+    the combined line can never match a single contiguous window.
+    Splitting lets the main phrase and each parenthetical match
+    independently. Lines with no parens return unchanged as one unit.
+    """
+    parens = _PAREN_RE.findall(text)
+    if not parens:
+        return [text]
+    units = []
+    # Collapse the whitespace sub() leaves where parens were removed.
+    main = " ".join(_PAREN_RE.sub(" ", text).split())
+    if main:
+        units.append(main)
+    for p in parens:
+        p = p.strip()
+        if p:
+            units.append(p)
+    return units or [text]
+
+
+def _tokenize_unit(text: str) -> list:
+    """Tokenize a match unit into [(normalized, raw), ...], dropping tokens
+    that normalize to empty (punctuation-only)."""
+    text = text.replace("—", " ").replace("--", " ")
+    toks = []
+    for tok in text.split():
+        norm = _normalize_token(tok)
+        if norm:
+            toks.append((norm, tok))
+    return toks
 
 
 def _edit_distance(a: list, b: list) -> int:
@@ -215,7 +265,18 @@ def _build_line_object(
     """
     lyric_norms = [t[0] for t in line_toks]
     win_norms = [_normalize_token(w["word"]) for w in win_words]
-    mapping = _walk_align(lyric_norms, win_norms, lookahead)
+    # Neutralize _walk_align's whole-song biases here: a selected tiling
+    # window is already a tight fuzzy match, so there's no long stretch of
+    # noise to absorb. confirm_matches=1 and whisper_skip_budget=1 reproduce
+    # the original symmetric "advance both on no-resync" behavior.
+    mapping = _walk_align(
+        lyric_norms,
+        win_norms,
+        lyric_lookahead=lookahead,
+        whisper_lookahead=lookahead,
+        confirm_matches=1,
+        whisper_skip_budget=1,
+    )
 
     n = len(line_toks)
     tw: list = [None] * n
@@ -280,52 +341,56 @@ def match_words_to_lines_tiling(
     """Order-independent matcher — see module docstring.
 
     Returns line_objects sorted by start time. Unlike the walk matcher this
-    does NOT emit one object per lyric line: dropped lines are absent and
-    repeated lines (choruses) appear multiple times. Each object carries a
-    ``line_id`` back-reference into ``lines``.
+    does NOT emit one object per lyric line: dropped lines are absent,
+    repeated lines (choruses) appear multiple times, and lines with
+    parenthetical phrases are split into separate objects (main phrase +
+    each parenthetical). Each object carries a ``line_id`` back-reference
+    into ``lines`` — multiple objects may share one ``line_id``.
 
-    When ``anchor_fallback`` is set, lines that produced zero candidates in
-    the main pass get a relaxed contiguous-anchor re-scan (see
-    find_anchor_candidates) before the tiling DP runs.
+    When ``anchor_fallback`` is set, match units that produced zero
+    candidates in the main pass get a relaxed contiguous-anchor re-scan
+    (see find_anchor_candidates) before the tiling DP runs.
     """
     if align_lines is None:
         align_lines = lines
 
-    # Tokenize each lyric line into (norm, raw) pairs.
-    line_tokens: list = []
-    for aline in align_lines:
-        aline_split = aline.replace("—", " ").replace("--", " ")
-        toks = []
-        for tok in aline_split.split():
-            norm = _normalize_token(tok)
-            if norm:
-                toks.append((norm, tok))
-        line_tokens.append(toks)
+    # Build match units. Most lines yield one unit; a line with
+    # parenthetical phrases splits into the main phrase + each paren as
+    # separate units (see _split_paren_units). Each unit keeps a line_id
+    # back-reference into ``lines`` for downstream speaker assignment.
+    unit_line_ids: list = []   # unit index -> original line index
+    unit_texts: list = []      # unit index -> display text
+    unit_tokens: list = []     # unit index -> [(norm, raw), ...]
+    for line_idx, aline in enumerate(align_lines):
+        for unit_text in _split_paren_units(aline):
+            unit_line_ids.append(line_idx)
+            unit_texts.append(unit_text)
+            unit_tokens.append(_tokenize_unit(unit_text))
 
     if not words:
         return []
 
     token_norms = [_normalize_token(w["word"]) for w in words]
-    lyric_lines_norm = [[t[0] for t in toks] for toks in line_tokens]
+    unit_lines_norm = [[t[0] for t in toks] for toks in unit_tokens]
 
-    candidates = find_candidates(token_norms, lyric_lines_norm, max_edit_ratio)
+    candidates = find_candidates(token_norms, unit_lines_norm, max_edit_ratio)
 
     if anchor_fallback:
-        matched_line_ids = {c[2] for c in candidates}
-        zero_candidate_lines = [
-            lid
-            for lid, toks in enumerate(lyric_lines_norm)
-            if toks and lid not in matched_line_ids
+        matched_units = {c[2] for c in candidates}
+        zero_candidate_units = [
+            uid
+            for uid, toks in enumerate(unit_lines_norm)
+            if toks and uid not in matched_units
         ]
-        if zero_candidate_lines:
+        if zero_candidate_units:
             anchor_cands = find_anchor_candidates(
-                token_norms, lyric_lines_norm, zero_candidate_lines
+                token_norms, unit_lines_norm, zero_candidate_units
             )
             recovered = len({c[2] for c in anchor_cands})
             logger.info(
-                "Anchor fallback: re-scanned %d zero-candidate lines → "
-                "%d candidates recovering %d lines",
-                len(zero_candidate_lines),
+                "Anchor fallback: re-scanned %d zero-candidate units → "
+                "%d candidates recovering %d units",
+                len(zero_candidate_units),
                 len(anchor_cands),
                 recovered,
             )
@@ -334,19 +399,25 @@ def match_words_to_lines_tiling(
     selected = best_tiling(candidates)
 
     logger.info(
-        "Tiling match: %d candidates → %d intervals selected, "
-        "covering %d/%d distinct lyric lines",
+        "Tiling match: %d candidates → %d intervals selected, covering "
+        "%d/%d match units across %d/%d lyric lines",
         len(candidates),
         len(selected),
         len({c[2] for c in selected}),
+        len(unit_texts),
+        len({unit_line_ids[c[2]] for c in selected}),
         len(lines),
     )
 
     line_objects = []
-    for start_idx, end_idx, line_id, _score in selected:
+    for start_idx, end_idx, unit_idx, _score in selected:
         win_words = words[start_idx:end_idx]
         obj = _build_line_object(
-            lines[line_id], line_id, line_tokens[line_id], win_words, lookahead
+            unit_texts[unit_idx],
+            unit_line_ids[unit_idx],
+            unit_tokens[unit_idx],
+            win_words,
+            lookahead,
         )
         line_objects.append(obj)
 
